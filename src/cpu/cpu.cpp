@@ -359,6 +359,17 @@ HaltReason BlackFinCpu::Run() {
         const uint32_t blockPc = cpuState_->pc;
         if (profiler_) profiler_->BeforeRun(blockPc);
 #endif
+        if (panicLog_) {  // with OP1_PANIC_LOG: the last 64 blocks before R246 reaches its halt loop
+            static u32 ring[64]; static unsigned ri = 0; static bool dumped = false;
+            ring[ri++ & 63] = cpuState_->pc;
+            if (!dumped && (cpuState_->pc == 0x01919954 || cpuState_->pc == 0x0191995A)) {
+                dumped = true;
+                fprintf(stderr, "HALT reached; last blocks:");
+                for (unsigned k = 0; k < 64; ++k) fprintf(stderr, " %08x", ring[(ri + k) & 63]);
+                fprintf(stderr, "\nHALT ivg=%d rets=%08x retx=%08x reti=%08x seqstat=%08x\n", cec_current_ivg(), cpuState_->rets,
+                        cpuState_->retx, cpuState_->reti, cpuState_->seqstat);
+            }
+        }
         // R246's panic(fmt, ...) at 0x01919AA8: log the format and first arguments (OP1_PANIC_LOG=1).
         // Most early-boot panics are suppressed by the firmware itself; a fatal one halts at 0x0191995A.
         if (cpuState_->pc == 0x01919AA8 && panicLog_) {
@@ -386,7 +397,9 @@ HaltReason BlackFinCpu::Run() {
 #endif
         cpuState_->did_jump = false; // Clear jump flag set by bcore, since we handle it in the emulator loop
         idle = cec_take_idle();
-        if (bcoreMemory_->TakeMmrTouched() || cec_pending()) break;
+        // Also stop while any interrupt is latched: when an RTI/STI makes it deliverable, hardware takes
+        // it before the next instruction, and VDK's rescheduling (RAISE 14 from an ISR) depends on that.
+        if (bcoreMemory_->TakeMmrTouched() || cec_pending() || cec_ilat()) break;
     }
     AfterBlock(batchStart);
     if (idle) IdleUntilInterrupt();

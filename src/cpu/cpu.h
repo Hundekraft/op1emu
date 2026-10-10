@@ -74,7 +74,7 @@ private:
     void AfterBlock(uint64_t cyclesElapsed);
     // Guest cycles per batch between device/interrupt polls (OP1EMU_BATCH overrides; 1 = every block).
     // Batch size once the firmware is up (see Run); 1 = poll devices after every block.
-    uint64_t batchCycles_ = 64;
+    uint64_t batchCycles_ = 32;  // 64 crashes R246 on tape playback (and at boot); see PLAN.md
     uint64_t lastSclkTicks_ = 0;
     uint64_t batchAfterCycles_ = UINT64_MAX;  // batching starts at this guest cycle (OP1EMU_BATCH_AFTER)
     bool batchArmed_ = false;

@@ -1,4 +1,6 @@
 #include "bcore_memory.h"
+#include <cstdio>
+#include <cstdlib>
 #ifdef ENABLE_PROFILING
 #include "profiling/profiler.h"
 
