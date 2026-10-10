@@ -360,6 +360,17 @@ static int RunEmulator(int argc, char* argv[]) {
         cpu.GetEmulator().MemoryRead(0xFFA00000, l1.data(), (int)l1.size());
         std::ofstream(dump, std::ios::binary).write(reinterpret_cast<const char*>(l1.data()), l1.size());
     }
+    // OP1_DUMP_MEM=ADDR:LEN:PATH (hex ADDR/LEN) writes any guest range at exit.
+    if (const char* spec = std::getenv("OP1_DUMP_MEM")) {
+        char* end = nullptr;
+        const u32 addr = (u32)strtoul(spec, &end, 16);
+        const u32 len = (end && *end == ':') ? (u32)strtoul(end + 1, &end, 16) : 0;
+        if (len && end && *end == ':') {
+            std::vector<u8> buf(len);
+            cpu.GetEmulator().MemoryRead(addr, buf.data(), (int)len);
+            std::ofstream(end + 1, std::ios::binary).write(reinterpret_cast<const char*>(buf.data()), len);
+        }
+    }
     if (cpu.Failed()) {
         LogError("Emulation stopped: CPU execution failed");
         result = 1;

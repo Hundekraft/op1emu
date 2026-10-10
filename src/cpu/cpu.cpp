@@ -1,3 +1,6 @@
+#include <iterator>
+#include <sstream>
+#include <fstream>
 #include "cpu.h"
 #include "bcore_memory.h"
 #include "ebiu.h"
@@ -117,6 +120,10 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     if (const char* b = getenv("OP1EMU_BATCH_AFTER")) batchAfterCycles_ = strtoull(b, nullptr, 10);
     panicLog_ = getenv("OP1_PANIC_LOG") != nullptr;
     stats_ = getenv("OP1EMU_STATS") != nullptr;
+    if (const char* b = getenv("OP1EMU_BREAK")) {  // PC[,HITS]: see OnBreak
+        breakPc_ = strtoul(b, nullptr, 16);
+        if (const char* c = strchr(b, ',')) breakHitsLeft_ = strtoul(c + 1, nullptr, 10);
+    }
     if (const char* b = getenv("OP1EMU_IDLE_STEP")) idleStepCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
     cpuState_ = std::make_unique<CpuState>();
     memset(cpuState_.get(), 0, sizeof(CpuState));
@@ -296,6 +303,20 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
         }
     }
 
+    // Debug: OP1EMU_WATCHW=ADDR[,WORDS] (hex address) logs the guest block pc of 32-bit writes to those words.
+    if (const char* w = getenv("OP1EMU_WATCHW")) {
+        const u32 base = strtoul(w, nullptr, 16);
+        const char* c = strchr(w, ',');
+        const u32 words = c ? strtoul(c + 1, nullptr, 10) : 1;
+        for (u32 i = 0; i < words; ++i) {
+            emulator.AddWriteHook(base + i * 4, [this](u32 addr, u32 v) {
+                emulator.MemoryWrite(addr, &v, 4);
+                static unsigned hits = 0;
+                if (hits++ < 200) LogInfo("watchw: write [%#x] = %#x, block pc %#x", addr, v, cpuState_->pc);
+            });
+        }
+    }
+
     // Initialize bcore after all devices are bound
     bcoreMemory_ = std::make_unique<EmulatorMemory>(emulator);
     core_ = std::make_shared<Core>(cpuState_.get(), bcoreMemory_.get());
@@ -390,8 +411,10 @@ HaltReason BlackFinCpu::Run() {
             fprintf(stderr, "FIRMWARE PANIC: fmt='%s' r1=0x%08x ('%s') r2=0x%08x r3=0x%08x rets=0x%08x ipend_ivg=%d\n", str(cpuState_->dpregs[0]).c_str(),
                     cpuState_->dpregs[1], str(cpuState_->dpregs[1]).c_str(), cpuState_->dpregs[2], cpuState_->dpregs[3], cpuState_->rets, cec_current_ivg());
         }
+        if (breakPc_ && cpuState_->pc == breakPc_) OnBreak();
         // Hit entry point, invalidating core to reset cached translations
         if (cpuState_->pc == 0xFFA00000) {
+            ApplyOverlay();
             core_->invalidate();
         }
         // Execute one basic block — bcore updates cpuState_->pc internally.
@@ -447,6 +470,72 @@ void BlackFinCpu::IdleUntilInterrupt() {
         coreTimer->UpdateCycles(cyclesElapsed);
         AfterBlock(cyclesElapsed);
     }
+}
+
+// Debug: OP1EMU_BREAK=PC[,HITS] logs the registers each time a block starts at PC (first HITS times, default 4).
+// OP1EMU_BREAK_MEM=ADDR:LEN[,...] (hex) also writes those guest ranges to OP1EMU_BREAK_DIR/hitN_ADDR.bin; an ADDR
+// of rN / pN / iN dumps from the address in that data, pointer or index register.
+void BlackFinCpu::OnBreak() {
+    if (!breakHitsLeft_) return;
+    const unsigned hit = breakHit_++;
+    --breakHitsLeft_;
+    const auto& r = cpuState_->dpregs;
+    LogInfo("break %#x hit %u: R0=%08x R1=%08x R2=%08x R3=%08x R4=%08x R5=%08x R6=%08x R7=%08x", cpuState_->pc, hit,
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+    LogInfo("  P0=%08x P1=%08x P2=%08x P3=%08x P4=%08x P5=%08x SP=%08x FP=%08x RETS=%08x guest_ns=%llu", r[8], r[9], r[10],
+            r[11], r[12], r[13], r[14], r[15], cpuState_->rets, (unsigned long long)time_.Nanoseconds());
+    const char* mem = getenv("OP1EMU_BREAK_MEM");
+    const char* dir = getenv("OP1EMU_BREAK_DIR");
+    if (!mem || !dir) return;
+    std::string spec(mem);
+    size_t pos = 0;
+    while (pos < spec.size()) {
+        size_t end = spec.find(',', pos);
+        if (end == std::string::npos) end = spec.size();
+        const std::string item = spec.substr(pos, end - pos);
+        pos = end + 1;
+        const size_t colon = item.find(':');
+        if (colon == std::string::npos) continue;
+        const std::string a = item.substr(0, colon);
+        const u32 addr = (a[0] == 'r') ? r[std::stoi(a.substr(1)) & 7]
+                       : (a[0] == 'p') ? r[8 + (std::stoi(a.substr(1)) & 7)]
+                       : (a[0] == 'i') ? cpuState_->iregs[std::stoi(a.substr(1)) & 3]
+                       : (u32)strtoul(a.c_str(), nullptr, 16);
+        const u32 len = (u32)strtoul(item.c_str() + colon + 1, nullptr, 16);
+        std::vector<u8> buf(len);
+        emulator.MemoryRead(addr, buf.data(), (int)len);
+        char path[512];
+        snprintf(path, sizeof path, "%s/hit%u_%s.bin", dir, hit, a.c_str());
+        if (FILE* f = fopen(path, "wb")) { fwrite(buf.data(), 1, len, f); fclose(f); }
+    }
+}
+
+// Dev aid: OP1EMU_OVERLAY=FILE applies "load ADDR PATH" (raw bytes) and "word ADDR VALUE" lines (hex) each time a
+// boot stage jumps to 0xFFA00000, i.e. after the LDR loader has written the stage. Lets a synth engine be tried
+// without reinstalling the firmware (tools/engines/build.sh writes the file). '#' starts a comment.
+void BlackFinCpu::ApplyOverlay() {
+    const char* path = getenv("OP1EMU_OVERLAY");
+    if (!path) return;
+    std::ifstream in(path);
+    if (!in) { LogError("overlay: cannot open %s", path); return; }
+    std::string kind, file;
+    unsigned n = 0;
+    for (std::string line; std::getline(in, line);) {
+        std::istringstream ls(line);
+        u32 addr = 0;
+        if (!(ls >> kind) || kind[0] == '#') continue;
+        if (kind == "load" && (ls >> std::hex >> addr >> file)) {
+            std::ifstream f(file, std::ios::binary);
+            std::vector<char> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (!f && buf.empty()) { LogError("overlay: cannot read %s", file.c_str()); continue; }
+            emulator.MemoryWrite(addr, buf.data(), (int)buf.size());
+            ++n;
+        } else if (kind == "word") {
+            u32 value = 0;
+            if (ls >> std::hex >> addr >> value) { emulator.MemoryWrite32(addr, value); ++n; }
+        }
+    }
+    LogInfo("overlay: applied %u entries from %s", n, path);
 }
 
 static uint64_t HostNowNs() {

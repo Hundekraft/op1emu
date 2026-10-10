@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "dma.h"
 #include "utils/log.h"
 #include <stdint.h>
@@ -87,6 +88,11 @@ DMAChannel::DMAChannel(const std::string& name, u32 baseAddr, DMA& dma, u16 defa
             if (auto bus = this->dma.GetDMABus(peripheralType)) bus->DMAFlush();
         }
         ProcessDescriptor();
+        static const bool log = getenv("OP1EMU_DMA_LOG") != nullptr;   // debug: channel setups
+        if (log && enabled)
+            LogInfo("DMA %s pmap %d: cfg %#x start %#x x %u/%d y %u/%d flow %d ndsize %d desc %#x", Name().c_str(),
+                    (int)peripheralType, value, startAddr, xCount, xModify, yCount, yModify, (int)next, descriptorSize,
+                    nextDescPtr);
         // NFC DMA is an unpaced 512-byte controller transfer. Running it only
         // from the global one-channel-per-BB round robin lets the previous
         // WR_DONE interrupt advance the firmware's sector state machine before

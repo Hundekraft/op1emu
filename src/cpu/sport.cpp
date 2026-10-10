@@ -3,6 +3,7 @@
 #include "time_source.h"
 #include "utils/log.h"
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 enum DataFormat {
@@ -191,7 +192,9 @@ u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
         return static_cast<u32>(read * frameSize);
     }
 
-    // Fill with silence
+    // No input attached: deliver silence. The DMA copies whatever is in dest into guest memory, and its
+    // buffer is reused stack (it held the last TX transfer, which fed the output back into the mix).
+    std::memset(dest, 0, available * frameSize);
     totalRxSamplesDelivered_ += available;
     return static_cast<u32>(available * frameSize);
 }

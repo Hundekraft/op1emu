@@ -81,6 +81,10 @@ private:
     bool realtime_ = false;
     void Pace();
     uint64_t paceStartNs_ = 0, paceCalls_ = 0, statsNextNs_ = 0, statsSleptNs_ = 0, statsMaxLagNs_ = 0;
+    u32 breakPc_ = 0;
+    unsigned breakHitsLeft_ = 4, breakHit_ = 0;
+    void OnBreak();
+    void ApplyOverlay();
     uint64_t statsTranslateNs_ = 0, statsTranslateN_ = 0;
     uint64_t statsLastGuestNs_ = 0, statsLastHostNs_ = 0;
     bool stats_ = false;
