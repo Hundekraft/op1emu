@@ -64,6 +64,9 @@ public:
     USBDevice& GetUSB() { return *usb; }
 
     void SetBootMode(int mode);
+    // Persistent JIT object cache directory ("" = off). See bcore Core::set_object_cache_dir.
+    void SetJitCacheDir(const std::string& dir);
+    void LogJitCacheStats();
 
     // True once the JIT could not translate or run a block. The CPU state is
     // then no longer advancing, so the host should stop instead of retrying.
@@ -114,8 +117,11 @@ protected:
     std::shared_ptr<GPIOPeripheral> gpioOrConnection;
     std::vector<std::shared_ptr<MCP230XX>> gpioExpanders;
     std::vector<std::shared_ptr<Device>> devices;
+    std::vector<Device*> processDevices_;  // devices with NeedsProcess(), in devices order
+    size_t processDevicesFor_ = 0;          // devices.size() processDevices_ was built for
     std::vector<std::tuple<std::chrono::nanoseconds, std::function<void()>>> eventQueue;
     std::recursive_mutex eventQueueMutex;
+    std::atomic<size_t> eventCount_{0};     // eventQueue.size(), readable without the lock
     std::chrono::nanoseconds elapsedTime{0};
 #ifdef ENABLE_PROFILING
     Profiler* profiler_ = nullptr;

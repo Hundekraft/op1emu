@@ -94,7 +94,13 @@ find_package(Threads REQUIRED)
 # of the emulator and of bcore, so a normal build carries none of it.
 option(ENABLE_PROFILING "Build the profiling hooks: phase marks, trace, census, perf/jitdump" OFF)
 set(BCORE_ENABLE_PROFILE ${ENABLE_PROFILING} CACHE BOOL "bcore observability API (follows ENABLE_PROFILING)" FORCE)
-set(BCORE_PERF_JIT_EVENTS ${ENABLE_PROFILING} CACHE BOOL "bcore jitdump support (follows ENABLE_PROFILING)" FORCE)
+# LLVM's perf JIT listener (jitdump) is Linux-only.
+if(ENABLE_PROFILING AND NOT APPLE)
+    set(_perf_jit ON)
+else()
+    set(_perf_jit OFF)
+endif()
+set(BCORE_PERF_JIT_EVENTS ${_perf_jit} CACHE BOOL "bcore jitdump support (follows ENABLE_PROFILING, Linux only)" FORCE)
 if(ENABLE_PROFILING)
     # perf call graphs through host code need frame pointers.
     add_compile_options(-fno-omit-frame-pointer)

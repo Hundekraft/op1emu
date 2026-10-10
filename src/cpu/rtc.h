@@ -11,6 +11,7 @@ public:
 
     void Tick();  // Called periodically to update RTC state
     void ProcessWithInterrupt(int ivg) override;
+    bool NeedsProcess() const override { return true; }
 
 private:
     void UpdateInterrupts();

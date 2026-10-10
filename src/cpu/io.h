@@ -42,6 +42,8 @@ public:
     void TriggerInterrupt(int level) const { if (interruptHandlers.size()) interruptHandlers.begin()->second(interruptHandlers.begin()->first, level); }
 
     virtual void ProcessWithInterrupt(int ivg) {}
+    // True when the device overrides ProcessWithInterrupt; Run() only calls those.
+    virtual bool NeedsProcess() const { return false; }
 
 protected:
     std::string name;

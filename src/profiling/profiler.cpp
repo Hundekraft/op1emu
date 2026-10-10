@@ -21,6 +21,10 @@
 #include <stdexcept>
 #include <unistd.h>
 #include <unordered_map>
+#if defined(__APPLE__)
+#include <pthread.h>
+static long gettid() { uint64_t tid = 0; pthread_threadid_np(nullptr, &tid); return static_cast<long>(tid); }
+#endif
 
 namespace {
 

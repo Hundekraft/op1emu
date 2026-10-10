@@ -102,6 +102,7 @@ public:
     void HandleDataRead(int ep, int interval, std::size_t limit, ReplyCallback callback) override;
 
     void ProcessWithInterrupt(int ivg) override;
+    bool NeedsProcess() const override { return true; }
 
 protected:
     void UpdateInterrupts();

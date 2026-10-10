@@ -87,6 +87,7 @@ public:
     void Write32(u32 offset, u32 value) override;
 
     void ProcessWithInterrupt(int ivg) override;
+    bool NeedsProcess() const override { return true; }
 
 protected:
     Emulator& emulator;

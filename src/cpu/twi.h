@@ -57,6 +57,7 @@ public:
     }
 
     void ProcessWithInterrupt(int ivg) override;
+    bool NeedsProcess() const override { return true; }
 
 protected:
     void ProcessMasterTransfer();

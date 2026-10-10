@@ -46,6 +46,7 @@ public:
     u32 DMAWrite(int x, int y, const void* source, u32 length) override;
 
     void ProcessWithInterrupt(int ivg) override;
+    bool NeedsProcess() const override { return true; }
 
 protected:
     u32 PageSize() const { return (pageSize == 0) ? 256 : 512; }

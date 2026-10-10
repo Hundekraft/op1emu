@@ -101,6 +101,15 @@ static int RunEmulator(int argc, char* argv[]) {
     bool help = false;
     bool options = true;
     std::string inputScript;
+    // Persistent JIT object cache: on by default, keyed by block content (see bcore JitEngine).
+    std::string jitCacheDir;
+    if (const char* home = std::getenv("HOME")) {
+#if defined(__APPLE__)
+        jitCacheDir = std::string(home) + "/Library/Caches/op1emu/jit";
+#else
+        jitCacheDir = std::string(home) + "/.cache/op1emu/jit";
+#endif
+    }
     // Profiling options (profiling builds only; see docs/profiling.md).
     std::string profileMarks, profileTrace, profileCensus, perfFifo, perfWindow, profileUntil;
     bool perfJitdump = false;
@@ -138,6 +147,11 @@ static int RunEmulator(int argc, char* argv[]) {
             anyProfiling = true;
         }
         else if (options && (arg == "--help" || arg == "-h")) help = true;
+        else if (options && arg == "--no-jit-cache") jitCacheDir.clear();
+        else if (options && arg == "--jit-cache") {
+            if (++i == argc || !*argv[i]) throw std::runtime_error("--jit-cache requires a directory");
+            jitCacheDir = argv[i];
+        }
         else if (options && arg == "--input-script") {
             if (++i == argc) throw std::runtime_error("--input-script requires a path");
             inputScript = argv[i];
@@ -155,6 +169,8 @@ static int RunEmulator(int argc, char* argv[]) {
                      "  --deterministic       Guest time from executed instructions, not host time:\n"
                      "                        repeatable runs, as fast as the host allows\n"
                      "  --rtc-epoch SECONDS   RTC time at boot with --deterministic (default 2024-01-01)\n"
+                     "  --jit-cache DIR       Persistent JIT object cache (default ~/Library/Caches/op1emu/jit)\n"
+                     "  --no-jit-cache        Compile every block, store nothing\n"
                      "Profiling builds (-DENABLE_PROFILING=ON, see docs/profiling.md):\n"
                      "  --profile-marks FILE  Phase marks (firmware PC ranges, verified frame)\n"
                      "  --profile-trace FILE  Chrome/Perfetto trace of translations and marks\n"
@@ -233,6 +249,7 @@ static int RunEmulator(int argc, char* argv[]) {
     // SPORT still drains DMA and advances its sample accounting without a
     // host sink. Avoid opening ALSA/PulseAudio devices on headless hosts.
     if (!headless) cpu.AttachAudioOutput(std::make_shared<MiniaudioOutput>());
+    cpu.SetJitCacheDir(jitCacheDir);
     cpu.SetBootMode(0x0D); // Set BMODE to 0b1101, boot from NAND flash with port H
 
     auto loop = uvw::loop::get_default();
@@ -329,6 +346,7 @@ static int RunEmulator(int argc, char* argv[]) {
     LogInfo("Stopping CPU thread...");
     cpuShouldStop.store(true);
     cpuThread.join();
+    cpu.LogJitCacheStats();
     if (cpu.Failed()) {
         LogError("Emulation stopped: CPU execution failed");
         result = 1;

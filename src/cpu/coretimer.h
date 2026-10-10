@@ -12,6 +12,7 @@ public:
     void UpdateCycles(u64 cycles);
 
     void ProcessWithInterrupt(int ivg) override;
+    bool NeedsProcess() const override { return true; }
 
 protected:
     bool IsEnabled() const { return power && enabled; }

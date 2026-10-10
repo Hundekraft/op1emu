@@ -363,7 +363,13 @@ HaltReason BlackFinCpu::Run() {
 
     // Get active IVG from CEC
     int ivg = cec_current_ivg();
-    for (const auto& device : devices) {
+    if (processDevicesFor_ != devices.size()) {
+        processDevices_.clear();
+        for (const auto& device : devices)
+            if (device->NeedsProcess()) processDevices_.push_back(device.get());
+        processDevicesFor_ = devices.size();
+    }
+    for (Device* device : processDevices_) {
         device->ProcessWithInterrupt(ivg);
     }
     // Drive the GP timers off the *delta* in cyclesElapsed, not off it landing
@@ -470,11 +476,17 @@ u32 BlackFinCpu::PC() {
 void BlackFinCpu::QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay) {
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
     eventQueue.push_back({delay, event});
+    eventCount_.store(eventQueue.size(), std::memory_order_release);
 }
 
 void BlackFinCpu::ProcessEvents() {
-    std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
     constexpr std::chrono::nanoseconds instructionTime(1); // Approximate instruction execution time
+    // Fast path: nearly every block runs with an empty queue. Skip the lock and the copy.
+    if (eventCount_.load(std::memory_order_acquire) == 0) {
+        elapsedTime += instructionTime;
+        return;
+    }
+    std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
     auto events = eventQueue;
     for (auto& [delay, event] : events) {
         if (delay <= std::chrono::nanoseconds(0)) {
@@ -494,6 +506,7 @@ void BlackFinCpu::ProcessEvents() {
             ++it;
         }
     }
+    eventCount_.store(eventQueue.size(), std::memory_order_release);
     elapsedTime += instructionTime;
 }
 
@@ -543,6 +556,16 @@ void BlackFinCpu::SetPotentiometerValue(u8 value) {
     QueueEvent([this, value]() {
         this->potentiometer->SetValue(value);
     });
+}
+
+void BlackFinCpu::SetJitCacheDir(const std::string& dir) {
+    core_->set_object_cache_dir(dir);
+    if (!dir.empty()) LogInfo("JIT object cache: %s", dir.c_str());
+}
+
+void BlackFinCpu::LogJitCacheStats() {
+    const uint64_t hits = core_->object_cache_hits(), misses = core_->object_cache_misses();
+    if (hits || misses) LogInfo("JIT object cache: %llu hits, %llu compiled", (unsigned long long)hits, (unsigned long long)misses);
 }
 
 void BlackFinCpu::SetBootMode(int mode) {
