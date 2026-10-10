@@ -42,6 +42,9 @@ private:
     u32 alarm = 0;
 
     u32 statShadow = 0;
+    bool statCacheValid_ = false;
+    u32 statCache_ = 0;
+    uint64_t statCacheUntilNs_ = 0;
     u32 lastStat = 0;
     std::chrono::system_clock::time_point baseTime;
     const TimeSource& time_;

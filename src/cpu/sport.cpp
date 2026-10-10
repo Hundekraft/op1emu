@@ -107,8 +107,7 @@ u32 SPORT::DMAReadAvailable(u32 length)
     const u32 frameSize = (receiveWordLength > 16 ? 4 : 2) * (receiveStereoFrameSync ? 2 : 1);
     if (length / frameSize == 0) return 0;
     if (!dmaRxActive_) return length;
-    const uint64_t due = ((time_.Nanoseconds() - dmaRxStartNs_) * sampleRateHz_ / 1'000'000'000ULL) / time_.Slowdown();
-    return due > totalRxSamplesDelivered_ ? length : 0;
+    return SampleDue(rxDue_, dmaRxStartNs_, totalRxSamplesDelivered_) ? length : 0;
 }
 
 u32 SPORT::DMAWriteCapacity(u32 length)
@@ -117,8 +116,27 @@ u32 SPORT::DMAWriteCapacity(u32 length)
     const u32 frameSize = (transmitWordLength > 16 ? 4 : 2) * (transmitStereoFrameSync ? 2 : 1);
     if (length / frameSize == 0) return 0;
     if (!dmaTxActive_) return length;
-    const uint64_t due = ((time_.Nanoseconds() - dmaTxStartNs_) * sampleRateHz_ / 1'000'000'000ULL) / time_.Slowdown();
-    return due > totalTxSamplesDelivered_ ? length : 0;
+    return SampleDue(txDue_, dmaTxStartNs_, totalTxSamplesDelivered_) ? length : 0;
+}
+
+// True when sample number delivered+1 is due: ((now - start) * rate / 1e9) / slowdown > delivered. Between
+// samples the answer is memoized as the guest time the next one becomes due, for the same inputs.
+bool SPORT::SampleDue(DueMemo& m, uint64_t startNs, uint64_t delivered)
+{
+    const uint64_t now = time_.Nanoseconds();
+    const unsigned slow = time_.Slowdown();
+    if (m.valid && m.start == startNs && m.delivered == delivered && m.rate == sampleRateHz_ && m.slow == slow)
+        return now >= m.dueNs;
+    const uint64_t due = ((now - startNs) * sampleRateHz_ / 1'000'000'000ULL) / slow;
+    if (due > delivered) {
+        m.valid = false;
+        return true;
+    }
+    // Smallest elapsed E with floor(E * rate / 1e9) >= (delivered + 1) * slow.
+    const uint64_t need = (delivered + 1) * slow;
+    const uint64_t e = (need * 1'000'000'000ULL + sampleRateHz_ - 1) / sampleRateHz_;
+    m = {true, startNs, delivered, sampleRateHz_, slow, startNs + e};
+    return false;
 }
 
 u32 SPORT::DMARead(int x, int y, void* dest, u32 length)

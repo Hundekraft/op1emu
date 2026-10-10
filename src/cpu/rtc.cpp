@@ -10,6 +10,7 @@ RTC::RTC(u32 baseAddr, const TimeSource& time) : RegisterDevice("RTC", baseAddr,
     REG32(RTC_STAT, 0x00);
     FIELD(RTC_STAT, RTC_STAT, 0, 32, R(GetCurrentStat()), [this](u32 v) {
         writePending = true;
+        statCacheValid_ = false;
         statShadow = v;
         baseTime = time_.SystemNow();
         lastStat = statShadow;
@@ -113,8 +114,18 @@ void RTC::Tick() {
         writeComplete = true;
     }
 
-    // Check for second tick
-    u32 currentStat = GetCurrentStat();
+    // Check for second tick. The value only changes at whole seconds, so it is computed once per
+    // second of guest time (Tick runs after every guest block).
+    const uint64_t nowNs = time_.Nanoseconds();
+    if (!statCacheValid_ || nowNs >= statCacheUntilNs_) {
+        statCache_ = GetCurrentStat();
+        // Guest time at which the second can next change: the clock value is now - baseTime + shadow.
+        const auto t = time_.SystemNow() - baseTime + BlackfinToTime(statShadow);
+        const uint64_t tNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
+        statCacheUntilNs_ = nowNs + (1'000'000'000ULL - tNs % 1'000'000'000ULL);
+        statCacheValid_ = true;
+    }
+    u32 currentStat = statCache_;
     auto currentStatTime = BlackfinToTime(currentStat);
     auto secondsSinceLast = std::chrono::duration_cast<std::chrono::seconds>(currentStatTime - BlackfinToTime(lastStat)).count();
 

@@ -22,6 +22,9 @@ public:
     u32 DMAWrite(int x, int y, const void* source, u32 length) override;
     u32 DMAWriteCapacity(u32 length) override;
     u32 DMAReadAvailable(u32 length) override;
+    struct DueMemo { bool valid = false; uint64_t start = 0, delivered = 0; uint32_t rate = 0; unsigned slow = 0; uint64_t dueNs = 0; };
+    DueMemo txDue_, rxDue_;
+    bool SampleDue(DueMemo& m, uint64_t startNs, uint64_t delivered);
 
     // Audio callbacks
     void SetAudioOutputCallback(AudioOutputCallback callback) { audioOutputCallback = callback; }

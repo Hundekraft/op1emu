@@ -339,6 +339,8 @@ static constexpr u32 MDMA_BURST_BYTES = 4096;
 
 void DMA::ProcessWithInterrupt(int ivg) {
     for (auto& channel : channels) {
+        // ProcessTransfer does nothing for these; skip the call (this runs after every guest block).
+        if (!channel->IsEnabled() || !channel->IsRunning()) continue;
         if (!channel->IsMDMA()) {
             channel->ProcessTransfer();
             continue;
