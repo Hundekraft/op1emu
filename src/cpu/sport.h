@@ -7,11 +7,13 @@
 #include <optional>
 #include <functional>
 #include <cstdint>
+#include <cstdio>
 
 class TimeSource;
 
 class SPORT : public RegisterDevice, public DMABus {
 public:
+    static constexpr uint32_t kSampleRateHz = 44100;
     using AudioOutputCallback = std::function<void(const void* data, size_t samples, int channels, int bitsPerSample)>;
     using AudioInputCallback = std::function<size_t(void* data, size_t samples, int channels, int bitsPerSample)>;
 
@@ -78,6 +80,12 @@ protected:
     uint64_t totalRxSamplesDelivered_ = 0;
     bool dmaRxActive_ = false;
 
-    // Nominal sample rate in Hz (future: derive from TCLKDIV/TFSDIV registers)
-    uint32_t sampleRateHz_ = 48000;
+    // Frame rate in Hz. R246 runs SPORT0 from external codec clocks (TCR1 ITCLK/ITFS clear), so the
+    // registers don't give it; 44.1 kHz is measured from note pitch (C4 = 169 samples per cycle).
+    uint32_t sampleRateHz_ = kSampleRateHz;
+
+    // Raw clock/sync config (debug: logged when DMA starts) and OP1EMU_AUDIO_DUMP raw sample dump.
+    u32 tcr1Raw_ = 0, tclkdiv_ = 0, tfsdiv_ = 0, rcr1Raw_ = 0, rclkdiv_ = 0, rfsdiv_ = 0;
+    FILE* dump_ = nullptr;
+    void LogConfig(const char* dir);
 };

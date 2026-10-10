@@ -28,6 +28,13 @@ HeadlessFrontend::HeadlessFrontend(const std::string& configPath, int inputFd) {
             throw std::runtime_error("Invalid GPIO for key: " + name);
         keys_.emplace(name, Pin{bank, index});
     }
+    if (json.contains("encoders")) {
+        for (const auto& [name, enc] : json.at("encoders").items()) {
+            const auto& cw = enc.at("clockwise_gpio");
+            const auto& ccw = enc.at("counter_clockwise_gpio");
+            encoders_[name] = Encoder{{cw.at(0).get<int>(), cw.at(1).get<int>()}, {ccw.at(0).get<int>(), ccw.at(1).get<int>()}};
+        }
+    }
     inputFd_ = dup(inputFd);
     if (inputFd_ < 0) throw std::runtime_error("Failed to open headless input");
 }
@@ -216,6 +223,14 @@ void HeadlessFrontend::Execute(const std::string& line, Clock::time_point now) {
             releaseAtResume_ = key->second;
             resumeAt_ = now + std::chrono::milliseconds(duration);
         }
+    } else if (command == "turn" && (args.size() == 3 || args.size() == 4) && (args[2] == "cw" || args[2] == "ccw")) {
+        // turn ENC cw|ccw [N]: N quadrature steps (default 4 = one full cycle), 10 ms apart, like the GUI clicks.
+        auto enc = encoders_.find(args[1]);
+        if (enc == encoders_.end()) throw std::runtime_error("Unknown encoder: " + args[1]);
+        const long n = args.size() == 4 ? Integer(args[3], 1, 1000, "Step count") : 4;
+        turning_ = &enc->second;
+        turnSteps_ = static_cast<int>(args[2] == "cw" ? n : -n);
+        resumeAt_ = now;
     } else {
         throw std::runtime_error("Invalid headless command: " + line);
     }
@@ -226,6 +241,18 @@ void HeadlessFrontend::PollEvents(Clock::time_point now) {
     // display code waiting forever even though we do not render its pixels.
     if (frameCallback_) frameCallback_(*this);
     if (now < resumeAt_ || shouldClose_) return;
+    if (turning_ && turnSteps_) {
+        static constexpr int kSeq[] = {0, 2, 3, 1};  // same Gray sequence as the GUI (bit 1 = cw pin, bit 0 = ccw pin)
+        Encoder& e = *turning_;
+        e.phase = (e.phase + (turnSteps_ > 0 ? 1 : 3)) % 4;
+        turnSteps_ += turnSteps_ > 0 ? -1 : 1;
+        const int v = kSeq[e.phase];
+        if (v & 2) OnKeyPressed(e.cw.first, e.cw.second); else OnKeyReleased(e.cw.first, e.cw.second);
+        if (v & 1) OnKeyPressed(e.ccw.first, e.ccw.second); else OnKeyReleased(e.ccw.first, e.ccw.second);
+        resumeAt_ = now + std::chrono::milliseconds(10);
+        if (!turnSteps_) turning_ = nullptr;
+        return;
+    }
     if (releaseAtResume_) {
         OnKeyReleased(releaseAtResume_->first, releaseAtResume_->second);
         releaseAtResume_.reset();

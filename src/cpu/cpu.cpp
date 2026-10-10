@@ -462,6 +462,10 @@ void BlackFinCpu::Pace() {
         const double hostS = (host - statsLastHostNs_) / 1e9, guestS = (guest - statsLastGuestNs_) / 1e9;
         LogInfo("realtime: %.2fx real time over %.1f s, slept %.0f%%, max lag %.1f ms",
                 guestS / hostS, hostS, 100.0 * statsSleptNs_ / 1e9 / hostS, statsMaxLagNs_ / 1e6);
+        const uint64_t tns = core_->translate_ns(), tn = core_->translate_count();
+        LogInfo("translate: %llu blocks, %.1f ms (byte-index/pack loads included)", (unsigned long long)(tn - statsTranslateN_),
+                (tns - statsTranslateNs_) / 1e6);
+        statsTranslateNs_ = tns; statsTranslateN_ = tn;
         LogInfo("batches %llu: size1 %llu | ends: mmr %llu pend %llu deliverable %llu urgent %llu idle %llu", (unsigned long long)batches_,
                 (unsigned long long)batchOne_, (unsigned long long)endMmr_, (unsigned long long)endPend_, (unsigned long long)endIlat_,
                 (unsigned long long)endUrg_, (unsigned long long)endIdle_);

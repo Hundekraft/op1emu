@@ -2,6 +2,8 @@
 #include "emu.h"
 #include "time_source.h"
 #include "utils/log.h"
+#include <cstdlib>
+#include <string>
 
 enum DataFormat {
     NORMAL = 0,
@@ -19,6 +21,7 @@ SPORT::SPORT(u32 baseAddr, int sportNum, const TimeSource& time)
     FIELD(SPORT_TCR1, TDTYPE, 2, 2, R(transmitDataFormat), W(transmitDataFormat));
     FIELD(SPORT_TCR1, TLSBIT, 4, 1, R(transmitOrderLsbFirst), W(transmitOrderLsbFirst));
     SPORT_TCR1.writeCallback = [this](u32 value) {
+        tcr1Raw_ = value;
         SetTransmitEnable();
     };
 
@@ -29,6 +32,15 @@ SPORT::SPORT(u32 baseAddr, int sportNum, const TimeSource& time)
     FIELD(SPORT_TCR2, TSFSE, 8, 1, R(transmitStereoFrameSync), W(transmitStereoFrameSync));
     FIELD(SPORT_TCR2, TXSE, 9, 1, R(transmitSecondaryEnabled), W(transmitSecondaryEnabled));
     FIELD(SPORT_TCR2, TRFST, 10, 1, R(transmitRightStereoOrderFirst), W(transmitRightStereoOrderFirst));
+
+    REG32(SPORT_TCLKDIV, 0x08);
+    FIELD(SPORT_TCLKDIV, VAL, 0, 16, R(tclkdiv_), W(tclkdiv_));
+    REG32(SPORT_TFSDIV, 0x0C);
+    FIELD(SPORT_TFSDIV, VAL, 0, 16, R(tfsdiv_), W(tfsdiv_));
+    REG32(SPORT_RCLKDIV, 0x28);
+    FIELD(SPORT_RCLKDIV, VAL, 0, 16, R(rclkdiv_), W(rclkdiv_));
+    REG32(SPORT_RFSDIV, 0x2C);
+    FIELD(SPORT_RFSDIV, VAL, 0, 16, R(rfsdiv_), W(rfsdiv_));
 
     REG32(SPORT_TX, 0x10);
     SPORT_TX.writeCallback = [this](u32 v) {
@@ -57,6 +69,7 @@ SPORT::SPORT(u32 baseAddr, int sportNum, const TimeSource& time)
     FIELD(SPORT_RCR1, RDTYPE, 2, 2, R(receiveDataFormat), W(receiveDataFormat));
     FIELD(SPORT_RCR1, RLSBIT, 4, 1, R(receiveOrderLsbFirst), W(receiveOrderLsbFirst));
     SPORT_RCR1.writeCallback = [this](u32 value) {
+        rcr1Raw_ = value;
         SetReceiveEnable();
     };
 
@@ -104,7 +117,7 @@ void SPORT::SetReceiveEnable() {
 u32 SPORT::DMAReadAvailable(u32 length)
 {
     if (!receiveEnabled) return 0;
-    const u32 frameSize = (receiveWordLength > 16 ? 4 : 2) * (receiveStereoFrameSync ? 2 : 1);
+    const u32 frameSize = (receiveWordLength > 16 ? 4 : 2) * (receiveStereoFrameSync ? 2 : 1) * (receiveSecondaryEnabled ? 2 : 1);
     if (length / frameSize == 0) return 0;
     if (!dmaRxActive_) return length;
     return SampleDue(rxDue_, dmaRxStartNs_, totalRxSamplesDelivered_) ? length : 0;
@@ -113,7 +126,7 @@ u32 SPORT::DMAReadAvailable(u32 length)
 u32 SPORT::DMAWriteCapacity(u32 length)
 {
     if (!transmitEnabled) return 0;
-    const u32 frameSize = (transmitWordLength > 16 ? 4 : 2) * (transmitStereoFrameSync ? 2 : 1);
+    const u32 frameSize = (transmitWordLength > 16 ? 4 : 2) * (transmitStereoFrameSync ? 2 : 1) * (transmitSecondaryEnabled ? 2 : 1);
     if (length / frameSize == 0) return 0;
     if (!dmaTxActive_) return length;
     return SampleDue(txDue_, dmaTxStartNs_, totalTxSamplesDelivered_) ? length : 0;
@@ -146,7 +159,7 @@ u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
     }
 
     int wordSize = receiveWordLength > 16 ? 4 : 2;
-    int channels = receiveStereoFrameSync ? 2 : 1;
+    int channels = (receiveStereoFrameSync ? 2 : 1) * (receiveSecondaryEnabled ? 2 : 1);
     int bitsPerSample = receiveWordLength;
     int frameSize = wordSize * channels;
     size_t requestedSamples = length / frameSize;
@@ -157,6 +170,7 @@ u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
         dmaRxStartNs_ = time_.Nanoseconds();
         totalRxSamplesDelivered_ = 0;
         dmaRxActive_ = true;
+        LogConfig("RX");
     }
 
     // How many samples are due based on elapsed time?
@@ -189,7 +203,8 @@ u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
     }
 
     int wordSize = transmitWordLength > 16 ? 4 : 2;
-    int channels = transmitStereoFrameSync ? 2 : 1;
+    // With the secondary channel enabled, DMA alternates primary and secondary words: one frame carries both.
+    int channels = (transmitStereoFrameSync ? 2 : 1) * (transmitSecondaryEnabled ? 2 : 1);
     int bitsPerSample = transmitWordLength;
     int frameSize = wordSize * channels;
     size_t requestedSamples = length / frameSize;
@@ -200,6 +215,7 @@ u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
         dmaTxStartNs_ = time_.Nanoseconds();
         totalTxSamplesDelivered_ = 0;
         dmaTxActive_ = true;
+        LogConfig("TX");
     }
 
     // How many samples are due based on elapsed time?
@@ -214,10 +230,27 @@ u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
     if (available > requestedSamples) available = requestedSamples;
     if (available == 0) return 0;  // Not time yet — DMA retries next cycle
 
+    if (dump_) fwrite(source, frameSize, available, dump_);
     if (audioOutputCallback) {
         audioOutputCallback(source, available, channels, bitsPerSample);
     }
 
     totalTxSamplesDelivered_ += available;
     return static_cast<u32>(available * frameSize);
+}
+
+void SPORT::LogConfig(const char* dir)
+{
+    const bool tx = dir[0] == 'T';
+    LogInfo("SPORT%d %s DMA start: CR1=%#x wordlen=%d stereo=%d CLKDIV=%u FSDIV=%u secondary=%d", sportNumber, dir,
+            tx ? tcr1Raw_ : rcr1Raw_, tx ? transmitWordLength : receiveWordLength,
+            tx ? transmitStereoFrameSync : receiveStereoFrameSync, tx ? tclkdiv_ : rclkdiv_, tx ? tfsdiv_ : rfsdiv_,
+            tx ? transmitSecondaryEnabled : receiveSecondaryEnabled);
+    if (tx && !dump_) {
+        if (const char* d = std::getenv("OP1EMU_AUDIO_DUMP")) {
+            const std::string path = std::string(d) + "/sport" + std::to_string(sportNumber) + ".raw";
+            dump_ = std::fopen(path.c_str(), "wb");
+            if (dump_) LogInfo("SPORT%d: dumping TX samples to %s", sportNumber, path.c_str());
+        }
+    }
 }

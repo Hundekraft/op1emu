@@ -59,6 +59,11 @@ private:
     std::string pending_;
     Clock::time_point resumeAt_{};
     std::optional<Pin> releaseAtResume_;
+    // Encoders: quadrature pins per name, current phase, and pending steps (+cw / -ccw) of a "turn".
+    struct Encoder { Pin cw, ccw; int phase = 0; };
+    std::map<std::string, Encoder> encoders_;
+    Encoder* turning_ = nullptr;
+    int turnSteps_ = 0;
 
     Sensors sensors_;
     uint64_t sensorVersion_ = 0;

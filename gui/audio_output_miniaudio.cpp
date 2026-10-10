@@ -2,12 +2,14 @@
 #include "miniaudio.h"
 #include "audio_output_miniaudio.h"
 #include "utils/log.h"
+#include "cpu/sport.h"
 #include <cstring>
 #include <algorithm>
 
-static constexpr ma_uint32 SAMPLE_RATE = 48000;
+static constexpr ma_uint32 SAMPLE_RATE = SPORT::kSampleRateHz;  // the guest's rate; miniaudio converts if needed
 static constexpr ma_uint32 CHANNELS = 2;
-static constexpr ma_uint32 RING_BUFFER_FRAMES = 4096; // ~85ms at 48kHz
+static constexpr ma_uint32 RING_BUFFER_FRAMES = 8192;  // ~186 ms
+static constexpr ma_uint32 kPrefillFrames = 2048;      // ~46 ms of latency against guest pacing jitter
 
 MiniaudioOutput::MiniaudioOutput()
     : device_(nullptr), ringBuffer_(nullptr) {
@@ -31,7 +33,7 @@ MiniaudioOutput::MiniaudioOutput()
     config.sampleRate = SAMPLE_RATE;
     config.periodSizeInFrames = 256; // ~5.3ms low-latency period
     config.dataCallback = reinterpret_cast<ma_device_data_proc>(DataCallback);
-    config.pUserData = rb;
+    config.pUserData = this;
 
     result = ma_device_init(nullptr, &config, dev);
     if (result != MA_SUCCESS) {
@@ -74,13 +76,17 @@ void MiniaudioOutput::DataCallback(void* pDevice, void* pOutput, const void* pIn
     (void)pInput;
 
     ma_device* dev = static_cast<ma_device*>(pDevice);
-    ma_pcm_rb* rb = static_cast<ma_pcm_rb*>(dev->pUserData);
+    auto* self = static_cast<MiniaudioOutput*>(dev->pUserData);
+    ma_pcm_rb* rb = static_cast<ma_pcm_rb*>(self->ringBuffer_);
     float* output = static_cast<float*>(pOutput);
 
     ma_uint32 framesRemaining = frameCount;
     ma_uint32 framesWritten = 0;
 
-    while (framesRemaining > 0) {
+    if (!self->playing_.load(std::memory_order_relaxed) && ma_pcm_rb_available_read(rb) >= kPrefillFrames)
+        self->playing_.store(true, std::memory_order_relaxed);
+
+    while (self->playing_.load(std::memory_order_relaxed) && framesRemaining > 0) {
         void* readBuffer;
         ma_uint32 framesToRead = framesRemaining;
         ma_result result = ma_pcm_rb_acquire_read(rb, &framesToRead, &readBuffer);
@@ -95,8 +101,12 @@ void MiniaudioOutput::DataCallback(void* pDevice, void* pOutput, const void* pIn
         framesRemaining -= framesToRead;
     }
 
-    // Fill remaining with silence (underrun)
+    // Underrun: fill with silence and wait for the prefill again.
     if (framesRemaining > 0) {
+        if (self->playing_.load(std::memory_order_relaxed)) {
+            self->underruns_.fetch_add(1, std::memory_order_relaxed);
+            self->playing_.store(false, std::memory_order_relaxed);
+        }
         memset(output + framesWritten * CHANNELS, 0, framesRemaining * CHANNELS * sizeof(float));
     }
 }
@@ -116,44 +126,29 @@ void MiniaudioOutput::WriteSamples(const void* data, size_t samples, int channel
     const uint8_t* src = static_cast<const uint8_t*>(data);
     int wordSize = bitsPerSample > 16 ? 4 : 2;
     size_t srcStride = wordSize * channels;
+    // Words wider than 24 bits are full-scale 32-bit (R246 sends 32-bit words with the sample in the top bits).
+    auto sample = [&](const uint8_t* p) -> float {
+        if (wordSize == 2) { int16_t v; memcpy(&v, p, 2); return v / 32768.0f; }
+        int32_t v; memcpy(&v, p, 4);
+        if (bitsPerSample > 24) return v / 2147483648.0f;
+        return ((v << 8) >> 8) / 8388608.0f;
+    };
 
     size_t framesRemaining = samples;
     while (framesRemaining > 0) {
         size_t framesToProcess = std::min(framesRemaining, CHUNK_FRAMES);
 
-        // Convert to float32 stereo
+        // First two channels -> stereo. R246 leaves the second one silent (speaker mode?); then play the
+        // first on both sides rather than in one ear.
+        bool rightSilent = channels >= 2;
+        for (size_t i = 0; i < framesToProcess && rightSilent; i++) {
+            uint32_t w = 0;
+            memcpy(&w, src + i * srcStride + wordSize, wordSize);
+            rightSilent = w == 0;
+        }
         for (size_t i = 0; i < framesToProcess; i++) {
-            float left = 0.0f, right = 0.0f;
-
-            if (bitsPerSample <= 16) {
-                // 16-bit signed integer
-                int16_t sample;
-                memcpy(&sample, src + i * srcStride, sizeof(int16_t));
-                left = static_cast<float>(sample) / 32768.0f;
-
-                if (channels >= 2) {
-                    memcpy(&sample, src + i * srcStride + 2, sizeof(int16_t));
-                    right = static_cast<float>(sample) / 32768.0f;
-                } else {
-                    right = left;
-                }
-            } else {
-                // 24-bit packed in 32-bit words
-                int32_t sample;
-                memcpy(&sample, src + i * srcStride, sizeof(int32_t));
-                // Sign-extend from 24-bit
-                sample = (sample << 8) >> 8;
-                left = static_cast<float>(sample) / 8388608.0f;
-
-                if (channels >= 2) {
-                    memcpy(&sample, src + i * srcStride + 4, sizeof(int32_t));
-                    sample = (sample << 8) >> 8;
-                    right = static_cast<float>(sample) / 8388608.0f;
-                } else {
-                    right = left;
-                }
-            }
-
+            const float left = sample(src + i * srcStride);
+            const float right = (channels >= 2 && !rightSilent) ? sample(src + i * srcStride + wordSize) : left;
             chunk[i * CHANNELS] = left;
             chunk[i * CHANNELS + 1] = right;
         }
@@ -162,13 +157,24 @@ void MiniaudioOutput::WriteSamples(const void* data, size_t samples, int channel
         ma_uint32 framesToWrite = static_cast<ma_uint32>(framesToProcess);
         void* writeBuffer;
         ma_result result = ma_pcm_rb_acquire_write(rb, &framesToWrite, &writeBuffer);
-        if (result == MA_SUCCESS && framesToWrite > 0) {
+        if (result != MA_SUCCESS) framesToWrite = 0;
+        if (framesToWrite > 0) {
             memcpy(writeBuffer, chunk, framesToWrite * CHANNELS * sizeof(float));
             ma_pcm_rb_commit_write(rb, framesToWrite);
         }
-        // If ring buffer is full, we drop samples (acceptable for emulator)
+        // If ring buffer is full, we drop samples (guest running ahead of the audio device)
+        dropped_.fetch_add(framesToProcess - framesToWrite, std::memory_order_relaxed);
 
         framesRemaining -= framesToProcess;
         src += framesToProcess * srcStride;
+    }
+
+    written_ += samples;
+    if (written_ >= nextReport_) {
+        if (nextReport_) {
+            const uint64_t u = underruns_.exchange(0), d = dropped_.exchange(0);
+            if (u || d) LogInfo("Audio: %llu underruns, %llu frames dropped in the last 10 s", (unsigned long long)u, (unsigned long long)d);
+        }
+        nextReport_ = written_ + 10 * SAMPLE_RATE;
     }
 }
