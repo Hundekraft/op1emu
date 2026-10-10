@@ -31,6 +31,7 @@ public:
     uint32_t rawmem_limit() const override { return rawLimit_; }
     // True once after the guest accessed an MMR (>= 0xFFC00000) since the last call.
     bool TakeMmrTouched() { const bool t = mmrTouched_; mmrTouched_ = false; return t; }
+    bool allow_chain() const override { return !mmrTouched_; }
 
 #ifdef ENABLE_PROFILING
     // Counts guest accesses to the MMR space (0xFFC00000 and up). Not owned.

@@ -379,6 +379,7 @@ HaltReason BlackFinCpu::Run() {
         }
         // Execute one basic block — bcore updates cpuState_->pc internally.
         // Hardware loops, PC advance, and hwloop counters are all handled by bcore.
+        core_->set_chain_budget(batch > 1 && executed < batch ? (uint32_t)(batch - executed) : 0);
         if (!core_->run(cpuState_->pc)) {
             // Translation/JIT failure: PC is unchanged, so retrying would loop
             // forever. Skip device processing and let the host stop the run.
