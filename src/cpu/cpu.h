@@ -70,9 +70,13 @@ public:
 private:
     void AfterBlock(uint64_t cyclesElapsed);
     // Guest cycles per batch between device/interrupt polls (OP1EMU_BATCH overrides; 1 = every block).
-    // Default 1: batching beyond ~48 cycles exposes a GP-timer model problem (TRUN never clears; the
-    // firmware halts at 0x0191995A). Raise only for experiments until gptimer ticks are time-accurate.
-    uint64_t batchCycles_ = 1;
+    // Batch size once the firmware is up (see Run); 1 = poll devices after every block.
+    uint64_t batchCycles_ = 64;
+    uint64_t lastSclkTicks_ = 0;
+    uint64_t batchAfterCycles_ = UINT64_MAX;  // batching starts at this guest cycle (OP1EMU_BATCH_AFTER)
+    bool batchArmed_ = false;
+    static constexpr u32 kMainDisplayPc = 0x019AB8B6;  // R246 main display routine (profiling mark)
+    uint64_t idleStepCycles_ = 256;  // guest cycles per idle step (OP1EMU_IDLE_STEP)
     void IdleUntilInterrupt();
 public:
     void LogJitCacheStats();

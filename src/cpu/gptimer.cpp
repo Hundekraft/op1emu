@@ -38,6 +38,8 @@ public:
 
     bool isRunning() const { return running; }
     void SetRunning(bool run);
+    void Advance(GPTimerClockType clock, u64 ticks);
+    u64 periodsCompleted = 0;  // PWM periods finished (the output's rising edges, for clocks derived from it)
 
     bool isOverflow() const { return overflow; }
     void clearOverflow() { overflow = false; errorType = GPTimer_ERROR_TYPE_NONE; }
@@ -140,6 +142,23 @@ void GPTimerImpl::clearInterruptPending() {
     TriggerInterrupt(0);
 }
 
+// Same result as calling Tick(clock) `ticks` times, but jumps the counter straight to the next tick where
+// Tick can do something (overflow, or the period/width match), so fast clocks cost per event, not per tick.
+void GPTimerImpl::Advance(GPTimerClockType clock, u64 ticks) {
+    while (ticks && running && clock == clockType) {
+        // Ticks until the counter reaches each event value (a full wrap counts as 2^32).
+        auto until = [this](u32 target) -> u64 { u32 d = target - counter; return d ? d : (1ull << 32); };
+        const u64 next = std::min(until(0xFFFFFFFFu), until(countToEndOfPeriod ? period : width));
+        if (ticks < next) {
+            counter += (u32)ticks;
+            return;
+        }
+        counter += (u32)(next - 1);  // quiet ticks
+        ticks -= next;
+        Tick(clock);                 // the event tick
+    }
+}
+
 void GPTimerImpl::Tick(GPTimerClockType clock) {
     if (!running || clock != clockType) return;
 
@@ -158,6 +177,7 @@ void GPTimerImpl::Tick(GPTimerClockType clock) {
     }
 
     if (counter == period && countToEndOfPeriod) {
+        periodsCompleted++;
         interruptPending = true;
         if (interruptEnabled) {
             TriggerInterrupt(1);
@@ -284,5 +304,25 @@ void GPTimer::BindInterrupt(int id, int q, InterruptHandler callback) {
 void GPTimer::Tick(GPTimerClockType clockType) {
     for (auto& timer : timers) {
         timer->Tick(clockType);
+    }
+}
+
+void GPTimer::Advance(GPTimerClockType clockType, u64 ticks) {
+    if (clockType != GPTimerClockTypeSCLK) {
+        for (auto& timer : timers) timer->Advance(clockType, ticks);
+        return;
+    }
+    // On the OP-1, TMRCLK (the PPI clock) is timer 7's PWM output: the firmware runs timer 7 on SCLK with
+    // period 14 (about 7.1 MHz), and timers 0/1 on TMRCLK make the display's frame syncs. So TMRCLK ticks
+    // once per completed timer-7 period. Advance in slices of at most one period so timers 0/1 see the
+    // ticks in step with SCLK.
+    auto& t7 = timers[7];
+    while (ticks) {
+        const u64 before = t7->periodsCompleted;
+        const u64 slice = std::min<u64>(ticks, 1024);
+        for (auto& timer : timers) timer->Advance(GPTimerClockTypeSCLK, slice);
+        ticks -= slice;
+        const u64 edges = t7->periodsCompleted - before;
+        if (edges) for (auto& timer : timers) timer->Advance(GPTimerClockTypeTMRCLK, edges);
     }
 }

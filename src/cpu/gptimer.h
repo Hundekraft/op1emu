@@ -21,6 +21,8 @@ public:
     void Write32(u32 offset, u32 value) override;
 
     void BindInterrupt(int id, int q, InterruptHandler callback);
+    // Advance timers on clockType by `ticks` (same as calling Tick that many times).
+    void Advance(GPTimerClockType clockType, u64 ticks);
 
     void Tick(GPTimerClockType clockType);
 

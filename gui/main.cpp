@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <csignal>
 #include <string>
 #include <optional>
@@ -347,6 +348,12 @@ static int RunEmulator(int argc, char* argv[]) {
     cpuShouldStop.store(true);
     cpuThread.join();
     cpu.LogJitCacheStats();
+    // Debugging aid: OP1_DUMP_L1=path writes L1 instruction memory (decrypted code) at exit.
+    if (const char* dump = std::getenv("OP1_DUMP_L1")) {
+        std::vector<u8> l1(0x14000);
+        cpu.GetEmulator().MemoryRead(0xFFA00000, l1.data(), (int)l1.size());
+        std::ofstream(dump, std::ios::binary).write(reinterpret_cast<const char*>(l1.data()), l1.size());
+    }
     if (cpu.Failed()) {
         LogError("Emulation stopped: CPU execution failed");
         result = 1;

@@ -114,6 +114,8 @@ public:
 
 BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     if (const char* b = getenv("OP1EMU_BATCH")) batchCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
+    if (const char* b = getenv("OP1EMU_BATCH_AFTER")) batchAfterCycles_ = strtoull(b, nullptr, 10);
+    if (const char* b = getenv("OP1EMU_IDLE_STEP")) idleStepCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
     cpuState_ = std::make_unique<CpuState>();
     memset(cpuState_.get(), 0, sizeof(CpuState));
 
@@ -333,7 +335,17 @@ HaltReason BlackFinCpu::Run() {
     // (some drivers depend on it, e.g. the NFC write-done handshake), compute and DSP loops batch.
     uint64_t batchStart = 0;
     bool idle = false;
-    for (uint64_t executed = 0; executed < batchCycles_ && !idle;) {
+    // Batching starts once the firmware is up: 1 s of guest time after it first enters its main display
+    // routine (R246), or after 20 s of guest time for firmware where that address means nothing. During
+    // boot it stays per-block: R246's startup has a thread race that coarser device polling loses (an
+    // early allocation panics once the "panics are fatal" flag is already set).
+    if (!batchArmed_) {
+        const uint64_t now = time_.Cycles();
+        if (cpuState_->pc == kMainDisplayPc && batchAfterCycles_ == UINT64_MAX) batchAfterCycles_ = now + TimeSource::kHz;
+        if (now >= batchAfterCycles_ || now >= 20 * TimeSource::kHz) batchArmed_ = true;
+    }
+    const uint64_t batch = batchArmed_ ? batchCycles_ : 1;
+    for (uint64_t executed = 0; executed < batch && !idle;) {
         // Guest time at the start of this block: host time, or in deterministic
         // mode the packets every earlier block executed (see TimeSource).
         const uint64_t cyclesElapsed = time_.Cycles();
@@ -345,6 +357,17 @@ HaltReason BlackFinCpu::Run() {
         const uint32_t blockPc = cpuState_->pc;
         if (profiler_) profiler_->BeforeRun(blockPc);
 #endif
+        if ((cpuState_->pc == 0x01A5E364 || cpuState_->pc == 0x01A5E3B0) && getenv("OP1_PANIC_DEBUG")) {  // TEMP
+            static int n364 = 0, n3b0 = 0;
+            int& n = cpuState_->pc == 0x01A5E364 ? n364 : n3b0;
+            if (n++ < 3) fprintf(stderr, "HEAP %s at cycle %llu ivg=%d rets=0x%08x\n", cpuState_->pc == 0x01A5E364 ? "INIT" : "NEW",
+                                 (unsigned long long)time_.Cycles(), cec_current_ivg(), cpuState_->rets);
+        }
+        if (cpuState_->pc == 0x01919AA8 && getenv("OP1_PANIC_DEBUG")) {  // TEMP: firmware panic(fmt, a, b)
+            auto str = [&](u32 a) { std::string m; for (int k = 0; k < 200; ++k) { char c = (char)emulator.MemoryRead8(a + k); if (!c) break; m += c; } return m; };
+            fprintf(stderr, "FIRMWARE PANIC: fmt='%s' r1=0x%08x ('%s') r2=0x%08x r3=0x%08x rets=0x%08x ipend_ivg=%d\n", str(cpuState_->dpregs[0]).c_str(),
+                    cpuState_->dpregs[1], str(cpuState_->dpregs[1]).c_str(), cpuState_->dpregs[2], cpuState_->dpregs[3], cpuState_->rets, cec_current_ivg());
+        }
         // Hit entry point, invalidating core to reset cached translations
         if (cpuState_->pc == 0xFFA00000) {
             core_->invalidate();
@@ -380,8 +403,8 @@ HaltReason BlackFinCpu::Run() {
 // pending, in which case IDLE does not sleep at all). The step limit returns control to the host loop.
 // In deterministic mode the steps add guest cycles; in wall mode guest time is host time anyway.
 void BlackFinCpu::IdleUntilInterrupt() {
-    constexpr uint64_t kIdleStepCycles = 64;   // 160 ns: bounds the extra interrupt latency
-    constexpr int kMaxIdleSteps = 4096;        // then return to the host loop (stop requests, input)
+    const uint64_t kIdleStepCycles = idleStepCycles_;  // bounds the extra interrupt latency
+    const int kMaxIdleSteps = (int)std::max<uint64_t>(1, 262144 / idleStepCycles_);  // ~0.65 ms, then back to the host loop
     const u32 idlePc = cpuState_->pc;
     auto awake = [&] { return cpuState_->pc != idlePc || cec_ilat() || sic->WakeupPending(); };
     for (int i = 0; i < kMaxIdleSteps && !awake(); ++i) {
@@ -431,10 +454,19 @@ void BlackFinCpu::AfterBlock(uint64_t cyclesElapsed) {
         lastTimerCycles_ += ticks * kCyclesPerTimerTick;
         if (ticks > kMaxCatchupTicks) ticks = kMaxCatchupTicks;
         for (uint64_t i = 0; i < ticks; ++i) {
-            gptimer->Tick(GPTimerClockTypeSCLK);
             gptimer->Tick(GPTimerClockTypeTACLK);
-            gptimer->Tick(GPTimerClockTypeTMRCLK);
         }
+    }
+    // SCLK-clocked timers run at the system clock, CCLK / kCclkPerSclk (assumed 400/100 MHz: there is no
+    // PLL model yet). TMRCLK is derived from timer 7 inside GPTimer::Advance. Only TACLK keeps the 40 kHz
+    // tick above. Ticking everything at 40 kHz made the display's frame-sync timers (0/1 on TMRCLK) about
+    // 180x too slow, and the firmware spent most of its time polling TIMER_STATUS for them to stop.
+    constexpr uint64_t kCclkPerSclk = 4;
+    constexpr uint64_t kMaxCatchupSclk = 100000000;  // 1 s; drop the rest of a host stall
+    const uint64_t sclk = (uint64_t)cyclesElapsed / kCclkPerSclk;
+    if (sclk > lastSclkTicks_) {
+        gptimer->Advance(GPTimerClockTypeSCLK, std::min(sclk - lastSclkTicks_, kMaxCatchupSclk));
+        lastSclkTicks_ = sclk;
     }
 
     if (time_.Deterministic()) ServicePanel();
