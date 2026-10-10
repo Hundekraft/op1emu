@@ -20,6 +20,8 @@ public:
     // DMABus interface
     u32 DMARead(int x, int y, void* dest, u32 length) override;
     u32 DMAWrite(int x, int y, const void* source, u32 length) override;
+    u32 DMAWriteCapacity(u32 length) override;
+    u32 DMAReadAvailable(u32 length) override;
 
     // Audio callbacks
     void SetAudioOutputCallback(AudioOutputCallback callback) { audioOutputCallback = callback; }

@@ -17,6 +17,10 @@ public:
     // Discard any buffered data. MDMA's internal FIFO is flushed when a new
     // transfer starts; peripheral buses ignore this.
     virtual void DMAFlush() {}
+    // How many of `length` bytes DMAWrite / DMARead would move right now, without side effects. Used only to
+    // skip a transfer that would move nothing; a bus that cannot tell returns `length` (always try).
+    virtual u32 DMAWriteCapacity(u32 length) { return length; }
+    virtual u32 DMAReadAvailable(u32 length) { return length; }
 };
 
 // MDMA source/destination channels are just two ordinary DMA channels
@@ -80,7 +84,7 @@ public:
 
     void BindInterrupt(int channel, int q, InterruptHandler callback);
 
-    std::shared_ptr<DMABus> GetDMABus(DMAPeripheralType type) { return dmaBuses[type]; }
+    const std::shared_ptr<DMABus>& GetDMABus(DMAPeripheralType type) { return dmaBuses[type]; }
     Emulator& GetEmulator() { return emulator; }
 
     u32 Read32(u32 offset) override;

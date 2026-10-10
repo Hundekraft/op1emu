@@ -182,7 +182,9 @@ void NFC::CalculateECC(const u8* data, u32 length) {
 }
 
 void NFC::UpdateInterrupts() {
-    u16 intStat = Read32(0x08);
+    // Same bits as Read32(0x08) (NFC_IRQSTAT), without the register-map walk on every guest block.
+    u16 intStat = (u16)((notBusyRising ? 1 : 0) | (writeBufferOverflow ? 2 : 0) | (writeBufferEmptyRising ? 4 : 0) |
+                        (readDataReady ? 8 : 0) | (pageWriteDone ? 16 : 0));
     // NOTE that irqmask bits are active low
     if (intStat & (~irqmask)) {
         // WR_DONE is a level until the guest W1C acknowledgement. Do not

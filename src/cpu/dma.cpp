@@ -192,7 +192,7 @@ bool DMAChannel::IsMDMASource() const {
 u32 DMAChannel::ProcessTransfer() {
     if (!enabled || !running) return 0;
 
-    auto bus = dma.GetDMABus(peripheralType);
+    const auto& bus = dma.GetDMABus(peripheralType);
     if (!bus) {
         LogWarn("DMA channel %s: No DMA bus attached for peripheral type %d", Name().c_str(), peripheralType);
         return 0;
@@ -203,6 +203,11 @@ u32 DMAChannel::ProcessTransfer() {
 
     u8 buffer[4096];
     totalBytes = std::min(totalBytes, (u32)sizeof(buffer));
+    // This runs after every guest block. When the peripheral would move nothing (SPORT between samples),
+    // the transfer below changes no state, so skip the lock and the up-to-4 KB memory copy.
+    if (currXCount != 0 &&
+        (memoryWrite ? bus->DMAReadAvailable(totalBytes) : bus->DMAWriteCapacity(totalBytes)) == 0)
+        return 0;
     dma.GetEmulator().Lock();
     if (memoryWrite) {
         totalBytes = bus->DMARead(xCount - currXCount, yCount - currYCount, buffer, totalBytes);

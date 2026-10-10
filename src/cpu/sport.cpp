@@ -98,6 +98,29 @@ void SPORT::SetReceiveEnable() {
     }
 }
 
+// Side-effect-free versions of the checks at the top of DMARead/DMAWrite: 0 exactly when those would
+// return 0 without changing state. Before the first transfer they return length, so the real call still
+// starts the timing.
+u32 SPORT::DMAReadAvailable(u32 length)
+{
+    if (!receiveEnabled) return 0;
+    const u32 frameSize = (receiveWordLength > 16 ? 4 : 2) * (receiveStereoFrameSync ? 2 : 1);
+    if (length / frameSize == 0) return 0;
+    if (!dmaRxActive_) return length;
+    const uint64_t due = ((time_.Nanoseconds() - dmaRxStartNs_) * sampleRateHz_ / 1'000'000'000ULL) / time_.Slowdown();
+    return due > totalRxSamplesDelivered_ ? length : 0;
+}
+
+u32 SPORT::DMAWriteCapacity(u32 length)
+{
+    if (!transmitEnabled) return 0;
+    const u32 frameSize = (transmitWordLength > 16 ? 4 : 2) * (transmitStereoFrameSync ? 2 : 1);
+    if (length / frameSize == 0) return 0;
+    if (!dmaTxActive_) return length;
+    const uint64_t due = ((time_.Nanoseconds() - dmaTxStartNs_) * sampleRateHz_ / 1'000'000'000ULL) / time_.Slowdown();
+    return due > totalTxSamplesDelivered_ ? length : 0;
+}
+
 u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
 {
     if (!receiveEnabled) {

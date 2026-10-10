@@ -92,8 +92,13 @@ u32 RTC::GetCurrentStat() {
 }
 
 void RTC::UpdateInterrupts() {
-    u32 ictl = Read32(0x04);
-    u32 istat = Read32(0x08);
+    // Runs after every guest block, so read the state directly instead of through the register map.
+    // Same values as Read32(0x04) / Read32(0x08).
+    // NOTE (upstream behavior, kept): `ictl & istat != 0` parses as `ictl & (istat != 0)`, so only the
+    // stopwatch enable bit gates the interrupt. Changing it changes what the firmware sees.
+    const u32 ictl = (u32)stopwatchIntEnabled;  // only bit 0 matters in the expression below
+    const bool istat = stopwatchEvent || alarmEvent || secondsEvent || minutesEvent || hoursEvent ||
+                       hours24Event || dayAlarmEvent || writePending || writeComplete;
     if (ictl & istat != 0) {
         TriggerInterrupt(1);
     } else {
