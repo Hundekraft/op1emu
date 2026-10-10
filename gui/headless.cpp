@@ -223,14 +223,18 @@ void HeadlessFrontend::Execute(const std::string& line, Clock::time_point now) {
             releaseAtResume_ = key->second;
             resumeAt_ = now + std::chrono::milliseconds(duration);
         }
-    } else if (command == "turn" && (args.size() == 3 || args.size() == 4) && (args[2] == "cw" || args[2] == "ccw")) {
-        // turn ENC cw|ccw [N]: N quadrature steps (default 4 = one full cycle), 10 ms apart, like the GUI clicks.
+    } else if (command == "turn" && args.size() >= 3 && args.size() <= 5 && (args[2] == "cw" || args[2] == "ccw")) {
+        // turn ENC cw|ccw [N [FRAMES]]: N quadrature edges (default 4 = one cycle), one every FRAMES guest display
+        // frames (default 2, ~33 ms of guest time). Paced by guest frames, not host time: the firmware samples the
+        // encoders from a thread, and edges closer together than that in guest time get lost when the guest runs
+        // slower than the host. The engine browser moves one item per 8 edges on enc1 (blue).
         auto enc = encoders_.find(args[1]);
         if (enc == encoders_.end()) throw std::runtime_error("Unknown encoder: " + args[1]);
-        const long n = args.size() == 4 ? Integer(args[3], 1, 1000, "Step count") : 4;
+        const long n = args.size() >= 4 ? Integer(args[3], 1, 1000, "Edge count") : 4;
         turning_ = &enc->second;
         turnSteps_ = static_cast<int>(args[2] == "cw" ? n : -n);
-        resumeAt_ = now;
+        turnFrames_ = args.size() == 5 ? static_cast<int>(Integer(args[4], 1, 100, "Frames per edge")) : 2;
+        turnNextFrame_ = 0;
     } else {
         throw std::runtime_error("Invalid headless command: " + line);
     }
@@ -242,6 +246,8 @@ void HeadlessFrontend::PollEvents(Clock::time_point now) {
     if (frameCallback_) frameCallback_(*this);
     if (now < resumeAt_ || shouldClose_) return;
     if (turning_ && turnSteps_) {
+        const uint64_t frame = FrameCount();
+        if (frame < turnNextFrame_) return;
         static constexpr int kSeq[] = {0, 2, 3, 1};  // same Gray sequence as the GUI (bit 1 = cw pin, bit 0 = ccw pin)
         Encoder& e = *turning_;
         e.phase = (e.phase + (turnSteps_ > 0 ? 1 : 3)) % 4;
@@ -249,8 +255,8 @@ void HeadlessFrontend::PollEvents(Clock::time_point now) {
         const int v = kSeq[e.phase];
         if (v & 2) OnKeyPressed(e.cw.first, e.cw.second); else OnKeyReleased(e.cw.first, e.cw.second);
         if (v & 1) OnKeyPressed(e.ccw.first, e.ccw.second); else OnKeyReleased(e.ccw.first, e.ccw.second);
-        resumeAt_ = now + std::chrono::milliseconds(10);
-        if (!turnSteps_) turning_ = nullptr;
+        turnNextFrame_ = frame + static_cast<uint64_t>(turnFrames_);
+        if (!turnSteps_) { turning_ = nullptr; frameTarget_ = turnNextFrame_; frameDeadline_ = now + std::chrono::minutes(10); }
         return;
     }
     if (releaseAtResume_) {
@@ -273,6 +279,6 @@ void HeadlessFrontend::PollEvents(Clock::time_point now) {
         std::string line;
         if (!ReadLine(line)) break;
         Execute(line, now);
-        if (now < resumeAt_ || shouldClose_ || frameTarget_) break;
+        if (now < resumeAt_ || shouldClose_ || frameTarget_ || turning_) break;
     }
 }

@@ -279,6 +279,23 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     std::tuple<GPIOPeripheral&, int> oledRs {*portG, 2};
     oled = std::make_shared<OLED>(oledDatabus, oledCs, oledRs, oledRd, oledWr);
 
+    // Debug: OP1EMU_WATCH=ADDR[,WORDS] (hex address) logs the guest block pc of 32-bit reads of those words.
+    // A hook in SDRAM turns off the JIT's inline SDRAM access (and so changes the JIT cache salt).
+    if (const char* w = getenv("OP1EMU_WATCH")) {
+        const u32 base = strtoul(w, nullptr, 16);
+        const char* c = strchr(w, ',');
+        const u32 words = c ? strtoul(c + 1, nullptr, 10) : 1;
+        for (u32 i = 0; i < words; ++i) {
+            emulator.AddReadHook(base + i * 4, [this](u32 addr) {
+                u32 v = 0;
+                emulator.MemoryRead(addr, &v, 4);
+                static unsigned hits = 0;
+                if (hits++ < 200) LogInfo("watch: read [%#x] = %#x, block pc %#x", addr, v, cpuState_->pc);
+                return v;
+            });
+        }
+    }
+
     // Initialize bcore after all devices are bound
     bcoreMemory_ = std::make_unique<EmulatorMemory>(emulator);
     core_ = std::make_shared<Core>(cpuState_.get(), bcoreMemory_.get());

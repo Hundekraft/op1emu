@@ -63,7 +63,8 @@ private:
     struct Encoder { Pin cw, ccw; int phase = 0; };
     std::map<std::string, Encoder> encoders_;
     Encoder* turning_ = nullptr;
-    int turnSteps_ = 0;
+    int turnSteps_ = 0, turnFrames_ = 2;
+    uint64_t turnNextFrame_ = 0;
 
     Sensors sensors_;
     uint64_t sensorVersion_ = 0;

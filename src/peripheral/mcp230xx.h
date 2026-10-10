@@ -15,6 +15,7 @@ public:
     MCP230XX(u32 address, MCP230XXModel model);
 
     bool Write(const u8* buffer, u32 length) override;
+    bool Read(u8* buffer, u32 length) override;
     Register* Next(u32 addr) const override;
 
     void SetInterruptCallback(std::function<void(int)> callback) {
@@ -59,4 +60,5 @@ protected:
     bool intClearOnReadIntcap = false;
 
     std::function<void(int)> interruptCallback;
+    bool log_ = false;  // OP1EMU_MCP_LOG=<i2c address, hex>: log this expander's I2C traffic and input changes
 };

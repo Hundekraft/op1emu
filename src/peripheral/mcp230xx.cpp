@@ -1,4 +1,7 @@
 #include "mcp230xx.h"
+#include "utils/log.h"
+#include <cstdlib>
+#include <string>
 
 #define MCP230XX_IODIR 0x00
 #define MCP230XX_IPOL 0x01
@@ -35,6 +38,7 @@ MCP230XX::MCP230XX(u32 address, MCP230XXModel model) : RegisterI2CPeripheral(add
     registerBank = (model == MCP230XXModel::MCP23008) ? true : false;
 
     SwitchRegisterBank();
+    if (const char* a = std::getenv("OP1EMU_MCP_LOG")) log_ = std::strtoul(a, nullptr, 16) == address;
 }
 
 int MCP230XX::GetPinCount() const {
@@ -132,7 +136,24 @@ void MCP230XX::SwitchRegisterBank() {
     }
 }
 
+bool MCP230XX::Read(u8* buffer, u32 length) {
+    const std::string name = readRegister ? readRegister->name : "?";
+    const u32 reg = readRegister ? readRegister->addr : 0;
+    const bool ok = RegisterI2CPeripheral::Read(buffer, length);
+    if (log_) {
+        std::string hex;
+        for (u32 i = 0; i < length; i++) { char b[4]; snprintf(b, sizeof b, " %02x", buffer[i]); hex += b; }
+        LogInfo("MCP %#x read  %s(%#x):%s", address, name.c_str(), reg, hex.c_str());
+    }
+    return ok;
+}
+
 bool MCP230XX::Write(const u8* buffer, u32 length) {
+    if (log_) {
+        std::string hex;
+        for (u32 i = 0; i < length; i++) { char b[4]; snprintf(b, sizeof b, " %02x", buffer[i]); hex += b; }
+        LogInfo("MCP %#x write%s%s", address, writeRegister ? (" @" + writeRegister->name).c_str() : "", hex.c_str());
+    }
     int bank = writeRegister ? REG_ADDR2BANK(writeRegister->addr) : -1;
     int reg = writeRegister ? REG_ADDR2REG(writeRegister->addr) : -1;
     if (!RegisterI2CPeripheral::Write(buffer, length)) {
@@ -176,6 +197,8 @@ bool MCP230XX::SetPinInput(int pin, GPIOPinLevel l) {
 
     inputConnected[bank] |= bit;
     u8 prevLevel = level[bank];
+    if (log_ && ((prevLevel & bit) != 0) != (l == GPIOPinLevel::High))
+        LogInfo("MCP %#x pin %d -> %d (inten %02x intActive %d)", address, pin, l == GPIOPinLevel::High, inten[bank], intActive[bank]);
     if (l == GPIOPinLevel::High) {
         level[bank] |= bit;
     } else {
