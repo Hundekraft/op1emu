@@ -20,6 +20,8 @@ public:
     DMAPeripheralType GetPeripheralType() const { return peripheralType; }
 
     u32 ProcessTransfer();
+    static constexpr u32 kTransferBufferBytes = 4096;
+    __attribute__((noinline)) u32 Transfer(DMABus* bus, int elementBytes, u32 totalBytes);
 
 protected:
     void ProcessDescriptor();
@@ -199,15 +201,18 @@ u32 DMAChannel::ProcessTransfer() {
     }
 
     int elementBytes = 1 << wordSize;
-    u32 totalBytes = currXCount * elementBytes;
-
-    u8 buffer[4096];
-    totalBytes = std::min(totalBytes, (u32)sizeof(buffer));
+    u32 totalBytes = std::min((u32)(currXCount * elementBytes), kTransferBufferBytes);
     // This runs after every guest block. When the peripheral would move nothing (SPORT between samples),
-    // the transfer below changes no state, so skip the lock and the up-to-4 KB memory copy.
+    // the transfer changes no state, so skip the lock and the up-to-4 KB memory copy. The copy lives in
+    // a separate function so this fast path has no 4 KB stack frame (and no stack probe) on every call.
     if (currXCount != 0 &&
         (memoryWrite ? bus->DMAReadAvailable(totalBytes) : bus->DMAWriteCapacity(totalBytes)) == 0)
         return 0;
+    return Transfer(bus.get(), elementBytes, totalBytes);
+}
+
+u32 DMAChannel::Transfer(DMABus* bus, int elementBytes, u32 totalBytes) {
+    u8 buffer[kTransferBufferBytes];
     dma.GetEmulator().Lock();
     if (memoryWrite) {
         totalBytes = bus->DMARead(xCount - currXCount, yCount - currYCount, buffer, totalBytes);
