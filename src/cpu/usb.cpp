@@ -339,8 +339,11 @@ void USB::UpdateInterrupts() {
     bool int1 = false;
     bool int2 = false;
     // Check USB interrupts
-    u32 intrusb = Read32(0x18);
-    u32 intrusbe = Read32(0x1C);
+    // Same values as Read32() of these registers, read directly: this runs after every guest block.
+    // USB_INTRUSB's only field is declared with length 0 at offset 3; MAKE_32BIT_MASK(3, 0) evaluates
+    // to 0xFFFFFFF8 on the hosts we run on (shift count taken mod 32), so the register reads SOF << 3.
+    u32 intrusb = sofDetected ? 0x8u : 0u;
+    u32 intrusbe = commonIntsEnabled;
     if (intrusb & intrusbe) {
         int0 |= commonIntsToINT0;
         int1 |= commonIntsToINT1;
@@ -348,8 +351,8 @@ void USB::UpdateInterrupts() {
     }
 
     // Check TX interrupts
-    u32 intrtx = Read32(0x08);
-    u32 intrtxe = Read32(0x10);
+    u32 intrtx = epTxInterrupts;
+    u32 intrtxe = epTxIntsEnabled;
     if (intrtx & intrtxe) {
         int0 |= txIntsToINT0;
         int1 |= txIntsToINT1;
@@ -357,8 +360,8 @@ void USB::UpdateInterrupts() {
     }
 
     // Check RX interrupts
-    u32 intrrx = Read32(0x0C);
-    u32 intrrxe = Read32(0x14);
+    u32 intrrx = epRxInterrupts;
+    u32 intrrxe = epRxIntsEnabled;
     if (intrrx & intrrxe) {
         int0 |= rxIntsToINT0;
         int1 |= rxIntsToINT1;

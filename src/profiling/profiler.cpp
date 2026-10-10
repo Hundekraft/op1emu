@@ -480,6 +480,8 @@ bool Profiler::Finish() {
     auto& impl = *impl_;
     impl.endWall = MonotonicNs();
     impl.cpu.SetCoreEventSink(nullptr);
+    // A census at exit too, so steady state after the last mark can be differenced against it.
+    if (impl.census) impl.DumpCensus("exit");
     bool ok = impl.WriteTrace() && !impl.censusFailed;
     for (const auto& mark : impl.marks)
         if (!mark.fired) std::fprintf(stderr, "[profile] mark %s did not fire\n", mark.name.c_str());

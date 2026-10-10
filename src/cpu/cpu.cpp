@@ -112,6 +112,7 @@ public:
 };
 
 BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
+    if (const char* b = getenv("OP1EMU_BATCH")) batchCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
     cpuState_ = std::make_unique<CpuState>();
     memset(cpuState_.get(), 0, sizeof(CpuState));
 
@@ -196,21 +197,13 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
 
     sic = std::make_shared<SIC>(0xFFC00100);
     sic->SetInterruptForwardCallback([this](int ivg, int level) {
-        if (level) {
-            QueueEvent([this, ivg]() {
-                cec_raise(cpuState_.get(), ivg);
-            });
-        }
+        if (level) QueueRaise(ivg);
     });
     devices.push_back(sic);
     nfc->SetIVGResolver([this]() { return sic->GetIVG(IRQ_NFC); });
     coreTimer = std::make_shared<CoreTimer>(0xFFE03000, time_);
     coreTimer->BindInterrupt(IVG_IVTMR, [this](int ivg, int level) {
-        if (level) {
-            QueueEvent([this, ivg]() {
-                cec_raise(cpuState_.get(), ivg);
-            });
-        }
+        if (level) QueueRaise(ivg);
     });
     devices.emplace_back(coreTimer);
 
@@ -331,34 +324,76 @@ static void SetBfinCycles(CpuState& cpu_state, u64 cycles) {
 }
 
 HaltReason BlackFinCpu::Run() {
-    // Guest time at the start of this block: host time, or in deterministic
-    // mode the packets every earlier block executed (see TimeSource).
-    const uint64_t cyclesElapsed = time_.Cycles();
-    SetBfinCycles(*cpuState_, cyclesElapsed);
-    coreTimer->UpdateCycles(cyclesElapsed);
+    // Runs guest blocks back to back and does the between-block work (interrupts, device polling,
+    // timers, events) once per batch of at least batchCycles_ guest cycles instead of after every
+    // block: most blocks are 2-6 instructions, and the per-block device work cost more than the guest
+    // code. CYCLES and the core timer still update per block. A batch ends early at IDLE, and after any
+    // block that touched an MMR or raised an interrupt: device-facing code keeps per-block behavior
+    // (some drivers depend on it, e.g. the NFC write-done handshake), compute and DSP loops batch.
+    uint64_t batchStart = 0;
+    bool idle = false;
+    for (uint64_t executed = 0; executed < batchCycles_ && !idle;) {
+        // Guest time at the start of this block: host time, or in deterministic
+        // mode the packets every earlier block executed (see TimeSource).
+        const uint64_t cyclesElapsed = time_.Cycles();
+        if (executed == 0) batchStart = cyclesElapsed;
+        SetBfinCycles(*cpuState_, cyclesElapsed);
+        coreTimer->UpdateCycles(cyclesElapsed);
 
 #ifdef ENABLE_PROFILING
-    const uint32_t blockPc = cpuState_->pc;
-    if (profiler_) profiler_->BeforeRun(blockPc);
+        const uint32_t blockPc = cpuState_->pc;
+        if (profiler_) profiler_->BeforeRun(blockPc);
 #endif
-    // Hit entry point, invalidating core to reset cached translations
-    if (cpuState_->pc == 0xFFA00000) {
-        core_->invalidate();
-    }
-    // Execute one basic block — bcore updates cpuState_->pc internally.
-    // Hardware loops, PC advance, and hwloop counters are all handled by bcore.
-    if (!core_->run(cpuState_->pc)) {
-        // Translation/JIT failure: PC is unchanged, so retrying would loop
-        // forever. Skip device processing and let the host stop the run.
-        LogError("JIT execution failed at PC 0x%08x", cpuState_->pc);
-        failed_.store(true, std::memory_order_release);
-        return HaltReason::Break;
-    }
-    time_.Retire(cpuState_->packets);
+        // Hit entry point, invalidating core to reset cached translations
+        if (cpuState_->pc == 0xFFA00000) {
+            core_->invalidate();
+        }
+        // Execute one basic block — bcore updates cpuState_->pc internally.
+        // Hardware loops, PC advance, and hwloop counters are all handled by bcore.
+        if (!core_->run(cpuState_->pc)) {
+            // Translation/JIT failure: PC is unchanged, so retrying would loop
+            // forever. Skip device processing and let the host stop the run.
+            LogError("JIT execution failed at PC 0x%08x", cpuState_->pc);
+            failed_.store(true, std::memory_order_release);
+            return HaltReason::Break;
+        }
+        time_.Retire(cpuState_->packets);
+        executed += cpuState_->packets ? cpuState_->packets : 1;
 #ifdef ENABLE_PROFILING
-    if (profiler_) profiler_->AfterRun(blockPc, cpuState_->packets);
+        if (profiler_) profiler_->AfterRun(blockPc, cpuState_->packets);
 #endif
-    cpuState_->did_jump = false; // Clear jump flag set by bcore, since we handle it in the emulator loop
+        cpuState_->did_jump = false; // Clear jump flag set by bcore, since we handle it in the emulator loop
+        idle = cec_take_idle();
+        if (bcoreMemory_->TakeMmrTouched() || cec_pending()) break;
+    }
+    AfterBlock(batchStart);
+    if (idle) IdleUntilInterrupt();
+    return HaltReason::Break;
+}
+
+// IDLE stalls the core until an interrupt. Instead of executing the firmware's idle loop over and over,
+// let guest time pass in small steps with the same per-block device work, until a wake-up: an interrupt
+// is taken (cec_check_pending in AfterBlock moves pc to the handler), one is latched in ILAT, or a
+// peripheral asserts one enabled in SIC_IWR. The last two wake the core even when IMASK/SIC_IMASK keep
+// the interrupt from being serviced (the boot ROM idles that way, often with the interrupt already
+// pending, in which case IDLE does not sleep at all). The step limit returns control to the host loop.
+// In deterministic mode the steps add guest cycles; in wall mode guest time is host time anyway.
+void BlackFinCpu::IdleUntilInterrupt() {
+    constexpr uint64_t kIdleStepCycles = 64;   // 160 ns: bounds the extra interrupt latency
+    constexpr int kMaxIdleSteps = 4096;        // then return to the host loop (stop requests, input)
+    const u32 idlePc = cpuState_->pc;
+    auto awake = [&] { return cpuState_->pc != idlePc || cec_ilat() || sic->WakeupPending(); };
+    for (int i = 0; i < kMaxIdleSteps && !awake(); ++i) {
+        if (time_.Deterministic()) time_.Retire(kIdleStepCycles);
+        const uint64_t cyclesElapsed = time_.Cycles();
+        SetBfinCycles(*cpuState_, cyclesElapsed);
+        coreTimer->UpdateCycles(cyclesElapsed);
+        AfterBlock(cyclesElapsed);
+    }
+}
+
+// Everything that happens between two guest blocks: interrupts, device polling, timers, events.
+void BlackFinCpu::AfterBlock(uint64_t cyclesElapsed) {
     cec_check_pending(cpuState_.get());
 
     // Get active IVG from CEC
@@ -403,7 +438,6 @@ HaltReason BlackFinCpu::Run() {
 
     if (time_.Deterministic()) ServicePanel();
     ProcessEvents();
-    return HaltReason::Break;
 }
 
 #ifdef ENABLE_PROFILING
@@ -475,7 +509,14 @@ u32 BlackFinCpu::PC() {
 
 void BlackFinCpu::QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay) {
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
-    eventQueue.push_back({delay, event});
+    eventQueue.push_back({delay, -1, event});
+    eventCount_.store(eventQueue.size(), std::memory_order_release);
+}
+
+void BlackFinCpu::QueueRaise(int ivg) {
+    std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
+    // Same 1 ns default delay as QueueEvent: the raise is delivered on the next ProcessEvents.
+    eventQueue.push_back({std::chrono::nanoseconds(1), ivg, {}});
     eventCount_.store(eventQueue.size(), std::memory_order_release);
 }
 
@@ -487,22 +528,27 @@ void BlackFinCpu::ProcessEvents() {
         return;
     }
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
-    auto events = eventQueue;
-    for (auto& [delay, event] : events) {
-        if (delay <= std::chrono::nanoseconds(0)) {
-            event();
+    // Run the events that were due when this call started, in order. Events they queue are not run in
+    // this pass and, if due, are dropped by the removal below (the behavior of the original copy-based
+    // loop, kept as is). Due events are moved out first, so an event that queues another cannot
+    // invalidate the one running.
+    dueEvents_.clear();
+    for (auto& e : eventQueue)
+        if (e.delay <= std::chrono::nanoseconds(0)) dueEvents_.push_back(std::move(e));
+    for (auto& e : dueEvents_) {
+        if (e.raiseIvg >= 0) cec_raise(cpuState_.get(), e.raiseIvg);
+        else e.fn();
 #ifdef ENABLE_PROFILING
-            ++eventsDelivered_;
+        ++eventsDelivered_;
 #endif
-        }
     }
     // Remove processed events
     auto it = eventQueue.begin();
     while (it != eventQueue.end()) {
-        if (std::get<0>(*it) <= std::chrono::nanoseconds(0)) {
+        if (it->delay <= std::chrono::nanoseconds(0)) {
             it = eventQueue.erase(it);
         } else {
-            std::get<0>(*it) -= instructionTime;
+            it->delay -= instructionTime;
             ++it;
         }
     }

@@ -26,7 +26,11 @@ public:
 
     const uint8_t* raw() const override;
 
-    uint32_t rawmem_limit() const override { return 0; }
+    // Guest addresses below rawmem_limit() are plain SDRAM at fast_base() + addr; bcore inlines those
+    // loads/stores and calls read*/write* only for the rest (MMRs, L1, boot ROM). 0 = always call.
+    uint32_t rawmem_limit() const override { return rawLimit_; }
+    // True once after the guest accessed an MMR (>= 0xFFC00000) since the last call.
+    bool TakeMmrTouched() { const bool t = mmrTouched_; mmrTouched_ = false; return t; }
 
 #ifdef ENABLE_PROFILING
     // Counts guest accesses to the MMR space (0xFFC00000 and up). Not owned.
@@ -35,6 +39,9 @@ public:
 
 private:
     Emulator& emulator_;
+    mutable bool mmrTouched_ = false;
+    uintptr_t rawBase_ = 0;
+    uint32_t rawLimit_ = 0;
 #ifdef ENABLE_PROFILING
     Profiler* profiler_ = nullptr;
     void Mmio(uint32_t addr, bool write) const;

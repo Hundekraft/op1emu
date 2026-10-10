@@ -52,6 +52,8 @@ public:
     bool MemoryWriteExclusive32(u32 vaddr, u32 value, u32 expected);
 
     void* MemoryMap(u32 addr);
+    // If addr lies in a plain MemoryDevice, its host base pointer and size (else false).
+    bool DirectRange(u32 addr, u8** host, u32* size);
 
     std::array<u8*, NUM_PAGE_TABLE_ENTRIES>& PageTable() { return *pageTable; }
     FastMem& GetFastMem() { return *fastmem; }

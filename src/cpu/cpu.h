@@ -66,6 +66,14 @@ public:
     void SetBootMode(int mode);
     // Persistent JIT object cache directory ("" = off). See bcore Core::set_object_cache_dir.
     void SetJitCacheDir(const std::string& dir);
+private:
+    void AfterBlock(uint64_t cyclesElapsed);
+    // Guest cycles per batch between device/interrupt polls (OP1EMU_BATCH overrides; 1 = every block).
+    // Default 1: batching beyond ~48 cycles exposes a GP-timer model problem (TRUN never clears; the
+    // firmware halts at 0x0191995A). Raise only for experiments until gptimer ticks are time-accurate.
+    uint64_t batchCycles_ = 1;
+    void IdleUntilInterrupt();
+public:
     void LogJitCacheStats();
 
     // True once the JIT could not translate or run a block. The CPU state is
@@ -119,7 +127,16 @@ protected:
     std::vector<std::shared_ptr<Device>> devices;
     std::vector<Device*> processDevices_;  // devices with NeedsProcess(), in devices order
     size_t processDevicesFor_ = 0;          // devices.size() processDevices_ was built for
-    std::vector<std::tuple<std::chrono::nanoseconds, std::function<void()>>> eventQueue;
+    // Pending host events in order. raiseIvg >= 0 is a cec_raise(ivg) (the common case: every SIC level
+    // update re-forwards the pending interrupts), which needs no std::function.
+    struct Event {
+        std::chrono::nanoseconds delay;
+        int raiseIvg;
+        std::function<void()> fn;
+    };
+    std::vector<Event> eventQueue;
+    std::vector<Event> dueEvents_;  // scratch for ProcessEvents
+    void QueueRaise(int ivg);
     std::recursive_mutex eventQueueMutex;
     std::atomic<size_t> eventCount_{0};     // eventQueue.size(), readable without the lock
     std::chrono::nanoseconds elapsedTime{0};

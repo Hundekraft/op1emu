@@ -21,6 +21,9 @@ public:
     // SIC_IARx, or -1 if `pin` is out of range.
     int GetIVG(int pin) const;
 
+    // A peripheral interrupt is asserted and enabled for wake-up (SIC_ISR & SIC_IWR): ends IDLE even if masked.
+    bool WakeupPending() const { return (isr[0] & iwr[0]) || (isr[1] & iwr[1]); }
+
 private:
     void InitRegisters();
     void ForwardInterrupts();

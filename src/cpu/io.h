@@ -72,6 +72,10 @@ protected:
     std::vector<u8> memory;
     std::shared_ptr<FastMem> fastmem;
     u8* memAddress = nullptr;
+    u8* mapped = nullptr;  // large backings: mmap'd at a fixed hint so JIT'd code (and its cache) can embed it
+public:
+    // Host pointer of the backing store, or nullptr if not bound yet.
+    u8* HostBase() const { return memAddress; }
 };
 
 

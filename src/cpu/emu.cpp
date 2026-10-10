@@ -167,3 +167,12 @@ void Emulator::PatchSoftwareBreak(u32 addr, u8 num)
 void Emulator::RemoveSoftwareBreak(u32 addr)
 {
 }
+
+bool Emulator::DirectRange(u32 addr, u8** host, u32* size)
+{
+    auto* dev = dynamic_cast<MemoryDevice*>(get_device(addr, deviceSegments));
+    if (!dev || !dev->HostBase() || dev->BaseAddress() != 0 || addr != 0) return false;
+    *host = dev->HostBase();
+    *size = dev->Size();
+    return true;
+}
