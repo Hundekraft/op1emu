@@ -3,4 +3,5 @@
 	url = https://github.com/op1emu/bfin_sim
 [submodule "ext/bcore"]
 	path = ext/bcore
-	url = https://github.com/op1emu/bcore.git
+	url = https://github.com/Hundekraft/bcore.git
+	branch = macos
