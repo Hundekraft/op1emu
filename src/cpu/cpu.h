@@ -67,6 +67,9 @@ public:
     void SetBootMode(int mode);
     // Persistent JIT object cache directory ("" = off). See bcore Core::set_object_cache_dir.
     void SetJitCacheDir(const std::string& dir);
+    // Pace deterministic guest time to the host clock: sleep whenever the guest is ahead. For interactive
+    // use once the emulator is faster than real time (guest time stays instruction-driven).
+    void SetRealtime(bool on) { realtime_ = on; }
 private:
     void AfterBlock(uint64_t cyclesElapsed);
     // Guest cycles per batch between device/interrupt polls (OP1EMU_BATCH overrides; 1 = every block).
@@ -76,6 +79,11 @@ private:
     uint64_t batchAfterCycles_ = UINT64_MAX;  // batching starts at this guest cycle (OP1EMU_BATCH_AFTER)
     bool batchArmed_ = false;
     bool panicLog_ = false;
+    bool realtime_ = false;
+    void Pace();
+    uint64_t paceStartNs_ = 0, paceCalls_ = 0, statsNextNs_ = 0, statsSleptNs_ = 0, statsMaxLagNs_ = 0;
+    uint64_t statsLastGuestNs_ = 0, statsLastHostNs_ = 0;
+    bool stats_ = false;
     static constexpr u32 kMainDisplayPc = 0x019AB8B6;  // R246 main display routine (profiling mark)
     uint64_t idleStepCycles_ = 256;  // guest cycles per idle step (OP1EMU_IDLE_STEP)
     void IdleUntilInterrupt();

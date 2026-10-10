@@ -98,6 +98,7 @@ static int RunEmulator(int argc, char* argv[]) {
     bool nandSnapshot = false;
     bool headless = false;
     bool deterministic = false;
+    bool realtime = false;
     std::optional<long long> rtcEpoch;
     bool help = false;
     bool options = true;
@@ -127,6 +128,7 @@ static int RunEmulator(int argc, char* argv[]) {
         else if (options && arg == "--nand-snapshot") nandSnapshot = true;
         else if (options && arg == "--headless") headless = true;
         else if (options && arg == "--deterministic") deterministic = true;
+        else if (options && arg == "--realtime") deterministic = realtime = true;
         else if (options && arg == "--rtc-epoch") {
             if (++i == argc) throw std::runtime_error("--rtc-epoch requires seconds since 1970");
             size_t used = 0;
@@ -167,6 +169,8 @@ static int RunEmulator(int argc, char* argv[]) {
                   << " <nand_flash_file> [ldr_file] [--nand-rw|--nand-snapshot]\n"
                      "  --headless            No GLFW window or host audio device\n"
                      "  --input-script PATH   Read headless commands from PATH instead of stdin\n"
+                     "  --realtime            Instruction-driven guest time paced to the host clock (interactive\n"
+                     "                        use; RTC from the host clock). OP1EMU_STATS=1 logs speed and lag\n"
                      "  --deterministic       Guest time from executed instructions, not host time:\n"
                      "                        repeatable runs, as fast as the host allows\n"
                      "  --rtc-epoch SECONDS   RTC time at boot with --deterministic (default 2024-01-01)\n"
@@ -227,6 +231,8 @@ static int RunEmulator(int argc, char* argv[]) {
     // Create BlackFin CPU
     BlackFinCpu cpu(deterministic);
     if (rtcEpoch) cpu.SetRtcEpoch(std::chrono::system_clock::time_point(std::chrono::seconds(*rtcEpoch)));
+    else if (realtime) cpu.SetRtcEpoch(std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now()));
+    cpu.SetRealtime(realtime);
 #ifdef ENABLE_PROFILING
     std::unique_ptr<Profiler> profiler;
     if (anyProfiling) {

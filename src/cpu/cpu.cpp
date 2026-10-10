@@ -116,6 +116,7 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     if (const char* b = getenv("OP1EMU_BATCH")) batchCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
     if (const char* b = getenv("OP1EMU_BATCH_AFTER")) batchAfterCycles_ = strtoull(b, nullptr, 10);
     panicLog_ = getenv("OP1_PANIC_LOG") != nullptr;
+    stats_ = getenv("OP1EMU_STATS") != nullptr;
     if (const char* b = getenv("OP1EMU_IDLE_STEP")) idleStepCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
     cpuState_ = std::make_unique<CpuState>();
     memset(cpuState_.get(), 0, sizeof(CpuState));
@@ -389,6 +390,7 @@ HaltReason BlackFinCpu::Run() {
     }
     AfterBlock(batchStart);
     if (idle) IdleUntilInterrupt();
+    if (realtime_ && (++paceCalls_ & 255) == 0) Pace();
     return HaltReason::Break;
 }
 
@@ -410,6 +412,41 @@ void BlackFinCpu::IdleUntilInterrupt() {
         SetBfinCycles(*cpuState_, cyclesElapsed);
         coreTimer->UpdateCycles(cyclesElapsed);
         AfterBlock(cyclesElapsed);
+    }
+}
+
+static uint64_t HostNowNs() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Keeps guest time (instruction-driven) within ~1-2 ms of host time: sleeps when ahead. When behind it
+// runs flat out, and a backlog over 50 ms is dropped (re-anchored) rather than caught up.
+void BlackFinCpu::Pace() {
+    const uint64_t host = HostNowNs();
+    if (!paceStartNs_) {
+        paceStartNs_ = host - time_.Nanoseconds();
+        statsNextNs_ = host + 5'000'000'000ULL;
+        statsLastHostNs_ = host;
+        statsLastGuestNs_ = time_.Nanoseconds();
+    }
+    const uint64_t guest = time_.Nanoseconds();
+    const uint64_t hostElapsed = host - paceStartNs_;
+    if (guest > hostElapsed + 2'000'000) {
+        const uint64_t ahead = guest - hostElapsed - 1'000'000;
+        std::this_thread::sleep_for(std::chrono::nanoseconds(ahead));
+        statsSleptNs_ += ahead;
+    } else if (hostElapsed > guest) {
+        statsMaxLagNs_ = std::max(statsMaxLagNs_, hostElapsed - guest);
+        // Too far behind (boot, a host stall): drop the backlog instead of running fast to catch up.
+        if (hostElapsed - guest > 50'000'000) paceStartNs_ = host - guest;
+    }
+    if (stats_ && host >= statsNextNs_) {
+        const double hostS = (host - statsLastHostNs_) / 1e9, guestS = (guest - statsLastGuestNs_) / 1e9;
+        LogInfo("realtime: %.2fx real time over %.1f s, slept %.0f%%, max lag %.1f ms",
+                guestS / hostS, hostS, 100.0 * statsSleptNs_ / 1e9 / hostS, statsMaxLagNs_ / 1e6);
+        statsNextNs_ = host + 5'000'000'000ULL;
+        statsLastHostNs_ = host; statsLastGuestNs_ = guest; statsSleptNs_ = 0; statsMaxLagNs_ = 0;
     }
 }
 
