@@ -40,6 +40,7 @@ public:
 private:
     Emulator& emulator_;
     mutable bool mmrTouched_ = false;
+
     uintptr_t rawBase_ = 0;
     uint32_t rawLimit_ = 0;
 #ifdef ENABLE_PROFILING

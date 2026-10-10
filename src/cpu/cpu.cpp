@@ -337,16 +337,12 @@ HaltReason BlackFinCpu::Run() {
     // (some drivers depend on it, e.g. the NFC write-done handshake), compute and DSP loops batch.
     uint64_t batchStart = 0;
     bool idle = false;
-    // Batching starts once the firmware is up: 1 s of guest time after it first enters its main display
-    // routine (R246), or after 20 s of guest time for firmware where that address means nothing. During
-    // boot it stays per-block: R246's startup has a thread race that coarser device polling loses (an
-    // early allocation panics once the "panics are fatal" flag is already set).
-    if (!batchArmed_) {
-        const uint64_t now = time_.Cycles();
-        if (cpuState_->pc == kMainDisplayPc && batchAfterCycles_ == UINT64_MAX) batchAfterCycles_ = now + TimeSource::kHz;
-        if (now >= batchAfterCycles_ || now >= 20 * TimeSource::kHz) batchArmed_ = true;
-    }
-    const uint64_t batch = batchArmed_ ? batchCycles_ : 1;
+    // An event waiting in the CPU lane (a raise that will latch a new interrupt, NAND busy, ...) is delivered
+    // on the next poll. Keep that poll one block away, as in per-block mode: R246 relies on that latency
+    // (the NAND ISR clears a request struct on the stack of the function that started the request; one
+    // batch later the function has returned and the ISR clears its own saved RETI).
+    const bool armed = time_.Cycles() >= batchAfterCycles_;
+    const uint64_t batch = (armed && !laneUrgent_) ? batchCycles_ : 1;
     for (uint64_t executed = 0; executed < batch && !idle;) {
         // Guest time at the start of this block: host time, or in deterministic
         // mode the packets every earlier block executed (see TimeSource).
@@ -397,10 +393,17 @@ HaltReason BlackFinCpu::Run() {
 #endif
         cpuState_->did_jump = false; // Clear jump flag set by bcore, since we handle it in the emulator loop
         idle = cec_take_idle();
-        // Also stop while any interrupt is latched: when an RTI/STI makes it deliverable, hardware takes
+        // Also stop when a latched interrupt became deliverable (after RTI/STI/IMASK changes): hardware takes
         // it before the next instruction, and VDK's rescheduling (RAISE 14 from an ISR) depends on that.
-        if (bcoreMemory_->TakeMmrTouched() || cec_pending() || cec_ilat()) break;
+        {
+            const bool mmr = bcoreMemory_->TakeMmrTouched(), pend = cec_pending(), il = cec_deliverable(cpuState_.get()), urg = laneUrgent_;
+            if (stats_) {  // batch-end reasons for OP1EMU_STATS
+                if (mmr) ++endMmr_; else if (pend) ++endPend_; else if (il) ++endIlat_; else if (urg) ++endUrg_;
+            }
+            if (mmr || pend || il || urg) break;
+        }
     }
+    if (stats_) { ++batches_; if (idle) ++endIdle_; if (batch == 1) ++batchOne_; }
     AfterBlock(batchStart);
     if (idle) IdleUntilInterrupt();
     if (realtime_ && (++paceCalls_ & 255) == 0) Pace();
@@ -458,6 +461,10 @@ void BlackFinCpu::Pace() {
         const double hostS = (host - statsLastHostNs_) / 1e9, guestS = (guest - statsLastGuestNs_) / 1e9;
         LogInfo("realtime: %.2fx real time over %.1f s, slept %.0f%%, max lag %.1f ms",
                 guestS / hostS, hostS, 100.0 * statsSleptNs_ / 1e9 / hostS, statsMaxLagNs_ / 1e6);
+        LogInfo("batches %llu: size1 %llu | ends: mmr %llu pend %llu deliverable %llu urgent %llu idle %llu", (unsigned long long)batches_,
+                (unsigned long long)batchOne_, (unsigned long long)endMmr_, (unsigned long long)endPend_, (unsigned long long)endIlat_,
+                (unsigned long long)endUrg_, (unsigned long long)endIdle_);
+        batches_ = batchOne_ = endMmr_ = endPend_ = endIlat_ = endUrg_ = endIdle_ = 0;
         statsNextNs_ = host + 5'000'000'000ULL;
         statsLastHostNs_ = host; statsLastGuestNs_ = guest; statsSleptNs_ = 0; statsMaxLagNs_ = 0;
     }
@@ -590,6 +597,7 @@ u32 BlackFinCpu::PC() {
 void BlackFinCpu::QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay) {
     if (OnCpuThread()) {
         cpuLane_.push_back({delay, -1, event});
+        laneUrgent_ = true;
         return;
     }
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
@@ -604,6 +612,9 @@ void BlackFinCpu::QueueRaise(int ivg) {
         const uint32_t bit = 1u << (ivg & 31);
         if (!sawUserMode_ && (laneRaiseMask_ & bit)) return;
         laneRaiseMask_ |= bit;
+        // Urgent only for an interrupt that is neither latched nor being serviced: a level source re-raised
+        // while its own handler runs just re-latches for after the RTI.
+        if (!((cec_ilat() | cec_ipend()) & bit)) laneUrgent_ = true;
         cpuLane_.push_back({std::chrono::nanoseconds(1), ivg, {}});
         return;
     }
@@ -617,7 +628,14 @@ void BlackFinCpu::ProcessEvents() {
         cpuThreadId_ = std::this_thread::get_id();
         cpuThreadKnown_.store(true, std::memory_order_release);
     }
-    if (!cpuLane_.empty()) ProcessLane(cpuLane_);
+    if (!cpuLane_.empty()) {
+        ProcessLane(cpuLane_);
+        // Still urgent if something left in the lane will change state when delivered.
+        laneUrgent_ = false;
+        const uint32_t busy = cec_ilat() | cec_ipend();
+        for (const auto& e : cpuLane_)
+            if (e.raiseIvg < 0 || !(busy & (1u << (e.raiseIvg & 31)))) { laneUrgent_ = true; break; }
+    }
     laneRaiseMask_ = 0;  // raises queued from here on run in the pass after this one
     // Fast path: nearly every block runs with no events from other threads. Skip the lock.
     if (eventCount_.load(std::memory_order_acquire) != 0) {

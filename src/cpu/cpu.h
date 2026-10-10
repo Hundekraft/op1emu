@@ -74,17 +74,15 @@ private:
     void AfterBlock(uint64_t cyclesElapsed);
     // Guest cycles per batch between device/interrupt polls (OP1EMU_BATCH overrides; 1 = every block).
     // Batch size once the firmware is up (see Run); 1 = poll devices after every block.
-    uint64_t batchCycles_ = 32;  // 64 crashes R246 on tape playback (and at boot); see PLAN.md
+    uint64_t batchCycles_ = 64;
     uint64_t lastSclkTicks_ = 0;
-    uint64_t batchAfterCycles_ = UINT64_MAX;  // batching starts at this guest cycle (OP1EMU_BATCH_AFTER)
-    bool batchArmed_ = false;
+    uint64_t batchAfterCycles_ = 0;  // batching starts at this guest cycle (OP1EMU_BATCH_AFTER)
     bool panicLog_ = false;
     bool realtime_ = false;
     void Pace();
     uint64_t paceStartNs_ = 0, paceCalls_ = 0, statsNextNs_ = 0, statsSleptNs_ = 0, statsMaxLagNs_ = 0;
     uint64_t statsLastGuestNs_ = 0, statsLastHostNs_ = 0;
     bool stats_ = false;
-    static constexpr u32 kMainDisplayPc = 0x019AB8B6;  // R246 main display routine (profiling mark)
     uint64_t idleStepCycles_ = 256;  // guest cycles per idle step (OP1EMU_IDLE_STEP)
     void IdleUntilInterrupt();
 public:
@@ -165,6 +163,8 @@ protected:
     // second one there is a no-op and is not queued. Off for good once the guest is seen in user mode, where
     // cec_raise can raise an exception instead.
     uint32_t laneRaiseMask_ = 0;
+    bool laneUrgent_ = false;
+    uint64_t batches_ = 0, batchOne_ = 0, endMmr_ = 0, endPend_ = 0, endIlat_ = 0, endUrg_ = 0, endIdle_ = 0;  // OP1EMU_STATS  // cpuLane_ holds an event that changes state when delivered
     bool sawUserMode_ = false;
     void QueueRaise(int ivg);
     std::recursive_mutex eventQueueMutex;
