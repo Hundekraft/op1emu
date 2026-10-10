@@ -4,12 +4,21 @@
 #include "utils/log.h"
 #include "cpu/sport.h"
 #include <cstring>
+#include <cstdlib>
 #include <algorithm>
 
 static constexpr ma_uint32 SAMPLE_RATE = SPORT::kSampleRateHz;  // the guest's rate; miniaudio converts if needed
 static constexpr ma_uint32 CHANNELS = 2;
-static constexpr ma_uint32 RING_BUFFER_FRAMES = 4096;  // ~186 ms at 22.05 kHz
-static constexpr ma_uint32 kPrefillFrames = 1024;      // ~46 ms of latency against guest pacing jitter
+// Playback starts (and restarts after an underrun) once the ring holds the prefill: the latency that absorbs
+// guest stalls (JIT compiles, host hiccups). OP1EMU_AUDIO_MS sets it (default 100 ms); the ring holds 3x that.
+static ma_uint32 PrefillFrames() {
+    static const ma_uint32 frames = [] {
+        long ms = 100;
+        if (const char* e = std::getenv("OP1EMU_AUDIO_MS")) ms = std::clamp(std::strtol(e, nullptr, 10), 10L, 1000L);
+        return (ma_uint32)(SAMPLE_RATE * ms / 1000);
+    }();
+    return frames;
+}
 
 MiniaudioOutput::MiniaudioOutput()
     : device_(nullptr), ringBuffer_(nullptr) {
@@ -18,7 +27,7 @@ MiniaudioOutput::MiniaudioOutput()
     auto* dev = new ma_device;
 
     // Initialize the ring buffer (float32, stereo)
-    ma_result result = ma_pcm_rb_init(ma_format_f32, CHANNELS, RING_BUFFER_FRAMES, nullptr, nullptr, rb);
+    ma_result result = ma_pcm_rb_init(ma_format_f32, CHANNELS, PrefillFrames() * 3, nullptr, nullptr, rb);
     if (result != MA_SUCCESS) {
         LogError("Failed to initialize audio ring buffer: %d", result);
         delete rb;
@@ -57,8 +66,8 @@ MiniaudioOutput::MiniaudioOutput()
     device_ = dev;
     ringBuffer_ = rb;
     active_.store(true);
-    LogInfo("Audio output initialized: %dHz, %dch, period=%d frames",
-            SAMPLE_RATE, CHANNELS, config.periodSizeInFrames);
+    LogInfo("Audio output initialized: %dHz, %dch, period=%d frames, buffer %u ms",
+            SAMPLE_RATE, CHANNELS, config.periodSizeInFrames, PrefillFrames() * 1000 / SAMPLE_RATE);
 }
 
 MiniaudioOutput::~MiniaudioOutput() {
@@ -83,7 +92,7 @@ void MiniaudioOutput::DataCallback(void* pDevice, void* pOutput, const void* pIn
     ma_uint32 framesRemaining = frameCount;
     ma_uint32 framesWritten = 0;
 
-    if (!self->playing_.load(std::memory_order_relaxed) && ma_pcm_rb_available_read(rb) >= kPrefillFrames)
+    if (!self->playing_.load(std::memory_order_relaxed) && ma_pcm_rb_available_read(rb) >= PrefillFrames())
         self->playing_.store(true, std::memory_order_relaxed);
 
     while (self->playing_.load(std::memory_order_relaxed) && framesRemaining > 0) {

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "glfw_display.h"
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
@@ -12,6 +13,12 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
+
+namespace {
+constexpr int kEdgesPerStep = EncoderQueue::kEdgesPerStep;
+constexpr double kDragPixelsPerEdge = 6.0;
+bool Inside(double x, double y, int l, int t, int w, int h) { return x >= l && x < l + w && y >= t && y < t + h; }
+}  // namespace
 
 GLFWDisplay::GLFWDisplay() {
     if (!glfwInit()) {
@@ -31,6 +38,8 @@ GLFWDisplay::GLFWDisplay() {
     glfwSetWindowUserPointer(window_, this);
     glfwSetMouseButtonCallback(window_, MouseButtonCallback);
     glfwSetKeyCallback(window_, KeyCallback);
+    glfwSetScrollCallback(window_, ScrollCallback);
+    glfwSetCursorPosCallback(window_, CursorPosCallback);
 
     backgroundTexture_ = LoadBackgroundTexture(uiConfig_.background, windowWidth_, windowHeight_);
     windowWidth_ = static_cast<int>(windowWidth_ * uiConfig_.scale);
@@ -136,7 +145,17 @@ void GLFWDisplay::LoadUIConfig(const std::string& path) {
             auto& ccw_gpio = enc["counter_clockwise_gpio"];
             counterClockwise.bank = ccw_gpio[0];
             counterClockwise.index = ccw_gpio[1];
+            clockwise.name = name;
             uiConfig_.encoders.push_back(std::make_tuple(clockwise, counterClockwise, 0));
+            encoderQueue_.Add({clockwise.bank, clockwise.index, counterClockwise.bank, counterClockwise.index});
+            EncoderInput input;
+            for (const auto& b : uiConfig_.buttons) {
+                if (b.name != name) continue;
+                input.pushBank = b.bank;
+                input.pushIndex = b.index;
+                input.pushRect = {b.left, b.top, b.width, b.height};
+            }
+            encoderInput_.push_back(input);
         }
     }
 }
@@ -267,6 +286,7 @@ void GLFWDisplay::RenderFramebuffer() {
 
 void GLFWDisplay::PollEvents() {
     glfwPollEvents();
+    PumpEncoders();
     RenderFramebuffer();
     if (onFrameStartCallback_) {
         onFrameStartCallback_(*this);
@@ -334,6 +354,37 @@ void GLFWDisplay::HandleMouseButton(int button, int action, double x, double y) 
         }
     }
 
+    // Encoders: press starts a possible drag; a release without dragging is a click (a step on the left or
+    // right side, the push button in the middle).
+    if (action == GLFW_PRESS) {
+        const int i = EncoderAt(x, y);
+        if (i >= 0) {
+            const auto& r = encoderInput_[i].pushRect;
+            activeEncoder_ = i;
+            dragLastY_ = y;
+            dragAccum_ = 0;
+            dragMoved_ = false;
+            pressInPush_ = r.width > 0 && Inside(x, y, r.left, r.top, r.width, r.height);
+            return;
+        }
+    } else if (action == GLFW_RELEASE && activeEncoder_ >= 0) {
+        const int i = activeEncoder_;
+        activeEncoder_ = -1;
+        if (!dragMoved_) {
+            auto& in = encoderInput_[i];
+            const auto& [cw, ccw, idx] = uiConfig_.encoders[i];
+            if (pressInPush_ && in.pushBank >= 0) {
+                OnKeyPressed(in.pushBank, in.pushIndex);
+                in.pushReleaseAt = glfwGetTime() + 0.1;
+            } else if (Inside(x, y, cw.left, cw.top, cw.width, cw.height)) {
+                StepEncoder(i, kEdgesPerStep);
+            } else if (Inside(x, y, ccw.left, ccw.top, ccw.width, ccw.height)) {
+                StepEncoder(i, -kEdgesPerStep);
+            }
+        }
+        return;
+    }
+
     // Check if click is within any button
     for (const auto& btn : uiConfig_.buttons) {
         if (x >= btn.left && x < btn.left + btn.width &&
@@ -346,38 +397,62 @@ void GLFWDisplay::HandleMouseButton(int button, int action, double x, double y) 
         }
     }
 
-    // Check if click is within any encoder areas
-    constexpr const int encoder_sequences[] = {0, 2, 3, 1};
-    for (auto& [cw, ccw, index] : uiConfig_.encoders) {
-        auto newIndex = index;
-        // Clockwise
-        if (x >= cw.left && x < cw.left + cw.width &&
-            y >= cw.top && y < cw.top + cw.height) {
-            if (action == GLFW_PRESS) {
-                newIndex = (index + 1) % (sizeof(encoder_sequences)/sizeof(encoder_sequences[0]));
-            }
+}
+
+// Encoder under (x, y): the whole strip from the counter-clockwise area to the clockwise area.
+int GLFWDisplay::EncoderAt(double x, double y) const {
+    for (size_t i = 0; i < uiConfig_.encoders.size(); ++i) {
+        const auto& [cw, ccw, idx] = uiConfig_.encoders[i];
+        const int left = std::min(ccw.left, cw.left), right = std::max(ccw.left + ccw.width, cw.left + cw.width);
+        const int top = std::min(ccw.top, cw.top), bottom = std::max(ccw.top + ccw.height, cw.top + cw.height);
+        if (x >= left && x < right && y >= top && y < bottom) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+void GLFWDisplay::StepEncoder(size_t index, int edges) { encoderQueue_.Step(index, edges); }
+
+// Called every GUI frame: queued encoder edges and pending push-button releases.
+void GLFWDisplay::PumpEncoders() {
+    const double now = glfwGetTime();
+    encoderQueue_.Pump(now, [this](int bank, int index, bool pressed) {
+        if (pressed) OnKeyPressed(bank, index); else OnKeyReleased(bank, index);
+    });
+    for (auto& in : encoderInput_) {
+        if (in.pushReleaseAt > 0 && now >= in.pushReleaseAt) {
+            OnKeyReleased(in.pushBank, in.pushIndex);
+            in.pushReleaseAt = 0;
         }
-        // Counter-clockwise
-        if (x >= ccw.left && x < ccw.left + ccw.width &&
-            y >= ccw.top && y < ccw.top + ccw.height) {
-            if (action == GLFW_PRESS) {
-                newIndex = (index - 1) % (sizeof(encoder_sequences)/sizeof(encoder_sequences[0]));
-            }
-        }
-        if (newIndex != index) {
-            int value = encoder_sequences[newIndex];
-            if (value & 2) {
-                OnKeyPressed(cw.bank, cw.index);
-            } else {
-                OnKeyReleased(cw.bank, cw.index);
-            }
-            if (value & 1) {
-                OnKeyPressed(ccw.bank, ccw.index);
-            } else {
-                OnKeyReleased(ccw.bank, ccw.index);
-            }
-            index = newIndex;
-        }
+    }
+}
+
+void GLFWDisplay::ScrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
+    (void)xoffset;
+    auto* display = static_cast<GLFWDisplay*>(glfwGetWindowUserPointer(window));
+    if (!display) return;
+    double x, y;
+    glfwGetCursorPos(window, &x, &y);
+    const int i = display->EncoderAt(x, y);
+    if (i < 0) return;
+    display->encoderQueue_.Wheel(i, yoffset);
+}
+
+void GLFWDisplay::CursorPosCallback(GLFWwindow* window, double x, double y) {
+    (void)x;
+    auto* display = static_cast<GLFWDisplay*>(glfwGetWindowUserPointer(window));
+    if (!display || display->activeEncoder_ < 0) return;
+    // Vertical drag on a held encoder: up = clockwise.
+    display->dragAccum_ += display->dragLastY_ - y;
+    display->dragLastY_ = y;
+    while (display->dragAccum_ >= kDragPixelsPerEdge) {
+        display->StepEncoder(display->activeEncoder_, 1);
+        display->dragAccum_ -= kDragPixelsPerEdge;
+        display->dragMoved_ = true;
+    }
+    while (display->dragAccum_ <= -kDragPixelsPerEdge) {
+        display->StepEncoder(display->activeEncoder_, -1);
+        display->dragAccum_ += kDragPixelsPerEdge;
+        display->dragMoved_ = true;
     }
 }
 

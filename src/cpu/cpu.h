@@ -1,4 +1,7 @@
 #pragma once
+#include <map>
+#include <unordered_map>
+#include <set>
 
 #include "emu.h"
 #include "time_source.h"
@@ -69,7 +72,12 @@ public:
     void SetJitCacheDir(const std::string& dir);
     // Pace deterministic guest time to the host clock: sleep whenever the guest is ahead. For interactive
     // use once the emulator is faster than real time (guest time stays instruction-driven).
-    void SetRealtime(bool on) { realtime_ = on; }
+    void SetRealtime(bool on) { realtime_ = on; UpdateAsyncCompile(); }
+    // Compile uncached blocks on a worker thread and interpret them meanwhile (see interp.h). On when guest
+    // time is paced to the host (--realtime, wall mode), off for --deterministic so runs stay reproducible.
+    // OP1EMU_ASYNC_JIT=0/1 overrides.
+    void UpdateAsyncCompile();
+    uint64_t InterpretedSteps() const { return interpSteps_; }
 private:
     void AfterBlock(uint64_t cyclesElapsed);
     // Guest cycles per batch between device/interrupt polls (OP1EMU_BATCH overrides; 1 = every block).
@@ -79,9 +87,16 @@ private:
     uint64_t batchAfterCycles_ = 0;  // batching starts at this guest cycle (OP1EMU_BATCH_AFTER)
     bool panicLog_ = false;
     bool realtime_ = false;
+    u32 verifyLo_ = 0, verifyHi_ = 0;
+    uint64_t verifyOk_ = 0, verifyBad_ = 0;
+    void VerifyAgainst(u32 pc, const CpuState& interp, const std::map<uint32_t, uint8_t>& writes);
+    uint32_t interpFirst_ = 0; u32 interpLo_ = 0, interpHi_ = 0xFFFFFFFF;
+    std::unordered_map<u32, uint32_t> interpVisits_;
+    uint64_t interpSteps_ = 0, interpBails_ = 0, statsInterpSteps_ = 0, statsInterpBails_ = 0;
     void Pace();
     uint64_t paceStartNs_ = 0, paceCalls_ = 0, statsNextNs_ = 0, statsSleptNs_ = 0, statsMaxLagNs_ = 0;
     u32 breakPc_ = 0;
+    std::set<u32> breakPcs_;
     uint32_t lastIpend_ = 0;
     unsigned breakHitsLeft_ = 4, breakHit_ = 0;
     void OnBreak();

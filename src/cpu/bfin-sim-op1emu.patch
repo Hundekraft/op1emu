@@ -1,0 +1,33 @@
+--- bfin-sim.c
++++ bfin-sim.c
+@@ -4533,7 +4533,8 @@
+ 	SET_ASTATREG (vs, 1);
+       SET_ASTATREG (ac0, ac0);
+       SET_ASTATREG (ac1, ac1);
+-      setflags_nz_2x16 (cpu, DREG (dst0));
++      /* op1emu: flags from the new value (STORE is deferred, DREG still holds the old one).  */
++      setflags_nz_2x16 (cpu, hi | lo);
+     }
+   else if (aop == 3 && HL == 0 && aopcde == 14 && x == 0 && s == 0)
+     {
+@@ -5093,7 +5094,8 @@
+       SET_ASTATREG (v, v);
+       if (v)
+ 	SET_ASTATREG (vs, 1);
+-      setflags_nz_2x16 (cpu, DREG (dst0));
++      /* op1emu: flags from the new value (STORE is deferred, DREG still holds the old one).  */
++      setflags_nz_2x16 (cpu, hi | lo);
+     }
+   else if (aop == 1 && aopcde == 6 && x == 0 && s == 0 && HL == 0)
+     {
+@@ -6104,8 +6106,9 @@
+ 
+       TRACE_INSN (cpu, "R%i = R%i >> %i;", dst0, src1, count);
+ 
++      /* op1emu: a logical left shift leaves V clear, as bcore (the JIT) does.  */
+       if (count < 0)
+-	STORE (DREG (dst0), lshift (cpu, DREG (src1), -count, 32, 0, 1));
++	STORE (DREG (dst0), lshift (cpu, DREG (src1), -count, 32, 0, 0));
+       else
+ 	STORE (DREG (dst0), lshiftrt (cpu, DREG (src1), count, 32));
+     }

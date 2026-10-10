@@ -33,6 +33,7 @@ HeadlessFrontend::HeadlessFrontend(const std::string& configPath, int inputFd) {
             const auto& cw = enc.at("clockwise_gpio");
             const auto& ccw = enc.at("counter_clockwise_gpio");
             encoders_[name] = Encoder{{cw.at(0).get<int>(), cw.at(1).get<int>()}, {ccw.at(0).get<int>(), ccw.at(1).get<int>()}};
+            wheelIndex_[name] = wheelQueue_.Add({cw.at(0).get<int>(), cw.at(1).get<int>(), ccw.at(0).get<int>(), ccw.at(1).get<int>()});
         }
     }
     inputFd_ = dup(inputFd);
@@ -235,6 +236,11 @@ void HeadlessFrontend::Execute(const std::string& line, Clock::time_point now) {
         turnSteps_ = static_cast<int>(args[2] == "cw" ? n : -n);
         turnFrames_ = args.size() == 5 ? static_cast<int>(Integer(args[4], 1, 100, "Frames per edge")) : 2;
         turnNextFrame_ = 0;
+    } else if (command == "wheel" && args.size() == 3) {
+        // wheel ENC NOTCHES: as the mouse wheel over that encoder in the GUI (EncoderQueue, host-time pacing).
+        auto it = wheelIndex_.find(args[1]);
+        if (it == wheelIndex_.end()) throw std::runtime_error("Unknown encoder: " + args[1]);
+        wheelQueue_.Wheel(it->second, std::stod(args[2]));
     } else {
         throw std::runtime_error("Invalid headless command: " + line);
     }
@@ -244,6 +250,10 @@ void HeadlessFrontend::PollEvents(Clock::time_point now) {
     // This callback drives PORTG3 frame sync; removing it can leave guest
     // display code waiting forever even though we do not render its pixels.
     if (frameCallback_) frameCallback_(*this);
+    wheelQueue_.Pump(std::chrono::duration<double>(now.time_since_epoch()).count(), [this](int bank, int index, bool pressed) {
+        if (pressed) OnKeyPressed(bank, index); else OnKeyReleased(bank, index);
+    });
+    if (!wheelQueue_.Idle()) return;   // later commands wait until the wheel edges are out
     if (now < resumeAt_ || shouldClose_) return;
     if (turning_ && turnSteps_) {
         const uint64_t frame = FrameCount();

@@ -2,6 +2,7 @@
 
 #include "peripheral/display.h"
 #include "peripheral/keyboard.h"
+#include "encoder_queue.h"
 #include <GLFW/glfw3.h>
 #include <vector>
 #include <tuple>
@@ -79,6 +80,11 @@ private:
     void DrawTexturedQuad(GLuint texture, float x, float y, float w, float h, float texW = 1.0f, float texH = 1.0f);
     static void MouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
     static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
+    static void ScrollCallback(GLFWwindow* window, double xoffset, double yoffset);
+    static void CursorPosCallback(GLFWwindow* window, double x, double y);
+    int EncoderAt(double x, double y) const;
+    void StepEncoder(size_t index, int edges);
+    void PumpEncoders();
     void HandleMouseButton(int button, int action, double x, double y);
     void HandleKeyboard(int key, int action);
     int MapKeyNameToGLFW(const std::string& keyName);
@@ -99,4 +105,16 @@ private:
     int windowWidth_ = 0;
     int windowHeight_ = 0;
     uint8_t volumeValue_ = 128;  // 0-255, start at middle
+
+    // Encoder input from the mouse (see encoder_queue.h) and each encoder's push button.
+    struct EncoderInput {
+        int pushBank = -1, pushIndex = -1;
+        DisplayRect pushRect{0, 0, 0, 0};
+        double pushReleaseAt = 0;   // > 0: release the push button at this time
+    };
+    EncoderQueue encoderQueue_;
+    std::vector<EncoderInput> encoderInput_;
+    int activeEncoder_ = -1;        // encoder under a held left button
+    double dragLastY_ = 0, dragAccum_ = 0;
+    bool dragMoved_ = false, pressInPush_ = false;
 };

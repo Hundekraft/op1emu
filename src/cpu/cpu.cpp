@@ -1,3 +1,5 @@
+#include <map>
+#include <set>
 #include <iterator>
 #include <sstream>
 #include <fstream>
@@ -18,6 +20,7 @@
 #include "rtc.h"
 #include "usb.h"
 #include "sport.h"
+#include "interp.h"
 #include "emu.h"
 #ifdef ENABLE_PROFILING
 #include "profiling/profiler.h"
@@ -115,13 +118,62 @@ public:
     }
 };
 
+namespace {
+// Debug (OP1EMU_INTERP_VERIFY): reads see the emulator's memory plus this run's own writes; writes stay here.
+class OverlayMemory : public Memory {
+public:
+    explicit OverlayMemory(Memory* base) : base_(base) {}
+    uint32_t base() const override { return 0; }
+    uint32_t size() const override { return 0xFFFFFFFF; }
+    uint8_t read8(uint32_t a) const override {
+        if (a >= 0xFFC00000u) { mmr_ = true; return 0; }   // never touch devices from the check
+        auto it = w_.find(a);
+        return it != w_.end() ? it->second : base_->read8(a);
+    }
+    bool touchedMmr() const { return mmr_; }
+    uint16_t read16(uint32_t a) const override { return (uint16_t)(read8(a) | read8(a + 1) << 8); }
+    uint32_t read32(uint32_t a) const override { return (uint32_t)read16(a) | (uint32_t)read16(a + 2) << 16; }
+    void write8(uint32_t a, uint8_t v) override { if (a >= 0xFFC00000u) mmr_ = true; w_[a] = v; }
+    void write16(uint32_t a, uint16_t v) override { write8(a, (uint8_t)v); write8(a + 1, (uint8_t)(v >> 8)); }
+    void write32(uint32_t a, uint32_t v) override { write16(a, (uint16_t)v); write16(a + 2, (uint16_t)(v >> 16)); }
+    const uint8_t* raw() const override { return nullptr; }
+    uintptr_t fast_base() const override { return 0; }
+    uint32_t rawmem_limit() const override { return 0; }
+    const std::map<uint32_t, uint8_t>& writes() const { return w_; }
+private:
+    Memory* base_;
+    std::map<uint32_t, uint8_t> w_;
+    mutable bool mmr_ = false;
+};
+}  // namespace
+
 BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     if (const char* b = getenv("OP1EMU_BATCH")) batchCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
     if (const char* b = getenv("OP1EMU_BATCH_AFTER")) batchAfterCycles_ = strtoull(b, nullptr, 10);
     panicLog_ = getenv("OP1_PANIC_LOG") != nullptr;
     stats_ = getenv("OP1EMU_STATS") != nullptr;
-    if (const char* b = getenv("OP1EMU_BREAK")) {  // PC[,HITS]: see OnBreak
-        breakPc_ = strtoul(b, nullptr, 16);
+    if (const char* v = getenv("OP1EMU_INTERP_VERIFY")) {
+        char* end = nullptr;
+        verifyLo_ = (u32)strtoul(v, &end, 16);
+        verifyHi_ = (end && *end == '-') ? (u32)strtoul(end + 1, nullptr, 16) : 0xFFFFFFFF;
+    }
+    if (const char* f = getenv("OP1EMU_INTERP_FIRST")) {
+        interpFirst_ = (uint32_t)strtoul(f, nullptr, 10);
+        if (const char* c = strchr(f, ',')) {
+            char* end = nullptr;
+            interpLo_ = (u32)strtoul(c + 1, &end, 16);
+            if (end && *end == '-') interpHi_ = (u32)strtoul(end + 1, nullptr, 16);
+        }
+    }
+    if (const char* b = getenv("OP1EMU_BREAK")) {  // PC[+PC...][,HITS]: see OnBreak
+        for (const char* q = b; *q && *q != ',';) {
+            char* end = nullptr;
+            const u32 pc = strtoul(q, &end, 16);
+            if (end == q) break;
+            breakPcs_.insert(pc);
+            q = (*end == '+') ? end + 1 : end;
+        }
+        breakPc_ = breakPcs_.empty() ? 0 : *breakPcs_.begin();
         if (const char* c = strchr(b, ',')) breakHitsLeft_ = strtoul(c + 1, nullptr, 10);
     }
     if (const char* b = getenv("OP1EMU_IDLE_STEP")) idleStepCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
@@ -415,7 +467,7 @@ HaltReason BlackFinCpu::Run() {
             fprintf(stderr, "FIRMWARE PANIC: fmt='%s' r1=0x%08x ('%s') r2=0x%08x r3=0x%08x rets=0x%08x ipend_ivg=%d\n", str(cpuState_->dpregs[0]).c_str(),
                     cpuState_->dpregs[1], str(cpuState_->dpregs[1]).c_str(), cpuState_->dpregs[2], cpuState_->dpregs[3], cpuState_->rets, cec_current_ivg());
         }
-        if (breakPc_ && cpuState_->pc == breakPc_) OnBreak();
+        if (breakPc_ && breakPcs_.count(cpuState_->pc)) OnBreak();
         // Hit entry point, invalidating core to reset cached translations
         if (cpuState_->pc == 0xFFA00000) {
             ApplyOverlay();
@@ -424,13 +476,54 @@ HaltReason BlackFinCpu::Run() {
         // Execute one basic block — bcore updates cpuState_->pc internally.
         // Hardware loops, PC advance, and hwloop counters are all handled by bcore.
         core_->set_chain_budget(batch > 1 && executed < batch ? (uint32_t)(batch - executed) : 0);
-        if (!core_->run(cpuState_->pc)) {
-            // Translation/JIT failure: PC is unchanged, so retrying would loop
-            // forever. Skip device processing and let the host stop the run.
-            LogError("JIT execution failed at PC 0x%08x", cpuState_->pc);
-            failed_.store(true, std::memory_order_release);
-            return HaltReason::Break;
+        // Test mode (deterministic): OP1EMU_INTERP_FIRST=N[,LO-HI] interprets each block start in [LO, HI) the
+        // first N times it is reached, then the JIT runs it. Exercises the interpreter reproducibly.
+        bool interpreted = false;
+        if (interpFirst_) {
+            const u32 pc0 = cpuState_->pc;
+            if (pc0 >= interpLo_ && pc0 < interpHi_ && interpVisits_[pc0]++ < interpFirst_) {
+                const uint32_t steps = Interpreter::Run(cpuState_.get(), bcoreMemory_.get(), cec_is_user_mode(), 256);
+                interpSteps_ += steps;
+                interpreted = steps != 0;
+            }
         }
+        // Debug: OP1EMU_INTERP_VERIFY=LO-HI runs the interpreter on a copy before each JIT block starting in
+        // [LO, HI) and compares registers and stores when both stop at the same pc.
+        CpuState verifyState;
+        std::unique_ptr<OverlayMemory> verifyMem;
+        uint32_t verifySteps = 0;
+        const u32 verifyPc = cpuState_->pc;
+        if (verifyHi_ && verifyPc >= verifyLo_ && verifyPc < verifyHi_ && !interpreted) {
+            verifyState = *cpuState_;
+            verifyMem = std::make_unique<OverlayMemory>(bcoreMemory_.get());
+            verifySteps = Interpreter::Run(&verifyState, verifyMem.get(), cec_is_user_mode(), 256);
+            core_->set_chain_budget(0);
+        }
+        if (!interpreted && !core_->run(cpuState_->pc)) {
+            // Async compile: the block is still compiling. Interpret one instruction meanwhile; what the
+            // interpreter leaves to the JIT (CEC/MMU work, exceptions, IDLE) waits for the compile.
+            // Straight-line code is interpreted up to the next jump (or loop back), so only real block
+            // starts come back to the JIT; stepping alone would hand it every instruction address.
+            bool ok = false;
+            if (core_->not_ready()) {
+                const uint32_t steps = Interpreter::Run(cpuState_.get(), bcoreMemory_.get(), cec_is_user_mode(), 256);
+                interpSteps_ += steps;
+                if (steps) {
+                    ok = true;
+                } else {
+                    ++interpBails_;
+                    ok = core_->run_sync(cpuState_->pc);
+                }
+            }
+            if (!ok) {
+                // Translation/JIT failure: PC is unchanged, so retrying would loop
+                // forever. Skip device processing and let the host stop the run.
+                LogError("JIT execution failed at PC 0x%08x", cpuState_->pc);
+                failed_.store(true, std::memory_order_release);
+                return HaltReason::Break;
+            }
+        }
+        if (verifySteps && !verifyMem->touchedMmr() && verifyState.pc == cpuState_->pc && cpuState_->packets == verifySteps) VerifyAgainst(verifyPc, verifyState, verifyMem->writes());
         time_.Retire(cpuState_->packets);
         executed += cpuState_->packets ? cpuState_->packets : 1;
 #ifdef ENABLE_PROFILING
@@ -542,6 +635,36 @@ void BlackFinCpu::ApplyOverlay() {
     LogInfo("overlay: applied %u entries from %s", n, path);
 }
 
+void BlackFinCpu::VerifyAgainst(u32 pc, const CpuState& in, const std::map<uint32_t, uint8_t>& writes) {
+    const CpuState& j = *cpuState_;
+    std::string diff;
+    char b[96];
+    auto cmp = [&](const char* name, uint32_t a, uint32_t c) {
+        if (a != c) { snprintf(b, sizeof b, " %s interp=%08x jit=%08x", name, a, c); diff += b; }
+    };
+    for (int i = 0; i < 16; ++i) { snprintf(b, sizeof b, "%s%d", i < 8 ? "R" : "P", i < 8 ? i : i - 8); cmp(b, in.dpregs[i], j.dpregs[i]); }
+    for (int i = 0; i < 4; ++i) { cmp("I", in.iregs[i], j.iregs[i]); cmp("M", in.mregs[i], j.mregs[i]); cmp("B", in.bregs[i], j.bregs[i]); cmp("L", in.lregs[i], j.lregs[i]); }
+    for (int i = 0; i < 2; ++i) { cmp("AX", in.ax[i], j.ax[i]); cmp("AW", in.aw[i], j.aw[i]); cmp("LC", in.lc[i], j.lc[i]); cmp("LT", in.lt[i], j.lt[i]); cmp("LB", in.lb[i], j.lb[i]); }
+    cmp("ASTAT", astat_compose(&in), astat_compose(&j));
+    cmp("RETS", in.rets, j.rets);
+    for (const auto& [a, v] : writes) {
+        const uint8_t real = emulator.MemoryRead8(a);
+        if (real != v) { snprintf(b, sizeof b, " [%08x] interp=%02x jit=%02x", a, v, real); diff += b; }
+    }
+    if (diff.empty()) { ++verifyOk_; return; }
+    ++verifyBad_;
+    static std::set<u32> seen;
+    if (seen.insert(pc).second) LogInfo("VERIFY mismatch block %#x (%u insns):%s", pc, j.packets, diff.c_str());
+}
+
+void BlackFinCpu::UpdateAsyncCompile() {
+    bool on = Interpreter::Available() && (realtime_ || !time_.Deterministic());
+    if (const char* e = getenv("OP1EMU_ASYNC_JIT")) on = Interpreter::Available() && e[0] == '1';
+    if (core_) core_->set_async_compile(on);
+    static bool logged = false;
+    if (!logged) { logged = true; LogInfo("JIT: %s compile", on ? "background (interpreting meanwhile)" : "synchronous"); }
+}
+
 static uint64_t HostNowNs() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -576,6 +699,13 @@ void BlackFinCpu::Pace() {
         LogInfo("translate: %llu blocks, %.1f ms (byte-index/pack loads included)", (unsigned long long)(tn - statsTranslateN_),
                 (tns - statsTranslateNs_) / 1e6);
         statsTranslateNs_ = tns; statsTranslateN_ = tn;
+        if (interpSteps_ != statsInterpSteps_ || interpBails_ != statsInterpBails_)
+            LogInfo("interpreted %llu instructions while compiling (%llu left to the JIT)",
+                    (unsigned long long)(interpSteps_ - statsInterpSteps_), (unsigned long long)(interpBails_ - statsInterpBails_));
+        statsInterpSteps_ = interpSteps_; statsInterpBails_ = interpBails_;
+        if (verifyHi_) LogInfo("verify: %llu blocks equal, %llu mismatches", (unsigned long long)verifyOk_, (unsigned long long)verifyBad_);
+        LogInfo("now: pc %#x ivg %d ipend %#x ilat %#x imask %#x", cpuState_->pc, cec_current_ivg(), cec_ipend(), cec_ilat(),
+                emulator.MemoryRead32(0xFFE02104));
         LogInfo("batches %llu: size1 %llu | ends: mmr %llu pend %llu deliverable %llu urgent %llu idle %llu", (unsigned long long)batches_,
                 (unsigned long long)batchOne_, (unsigned long long)endMmr_, (unsigned long long)endPend_, (unsigned long long)endIlat_,
                 (unsigned long long)endUrg_, (unsigned long long)endIdle_);

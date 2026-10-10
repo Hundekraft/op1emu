@@ -2,6 +2,7 @@
 
 #include "peripheral/display.h"
 #include "peripheral/keyboard.h"
+#include "encoder_queue.h"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -63,6 +64,9 @@ private:
     struct Encoder { Pin cw, ccw; int phase = 0; };
     std::map<std::string, Encoder> encoders_;
     Encoder* turning_ = nullptr;
+    // "wheel": the GUI's encoder queue, paced in host time like the window (tests the GUI's pacing).
+    EncoderQueue wheelQueue_;
+    std::map<std::string, size_t> wheelIndex_;
     int turnSteps_ = 0, turnFrames_ = 2;
     uint64_t turnNextFrame_ = 0;
 
