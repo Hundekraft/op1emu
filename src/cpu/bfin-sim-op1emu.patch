@@ -1,6 +1,180 @@
 --- bfin-sim.c
 +++ bfin-sim.c
-@@ -4533,7 +4533,8 @@
+@@ -536,12 +536,28 @@
+       sim_io_eprintf (CPU_STATE (cpu), "STORE(): unknown register\n");
+       abort ();
+     }
++}
++
++/* op1emu: which bits each queued store writes. Two slots of one parallel instruction may each write one
++   half of the same register (R0.H = R0.L + R6.L || R0.L = W[P0++P5]); whole-register stores would let
++   the second undo the first.  */
++static bu32 store_masks[20];
++
++static void
++queue_store_mask (SIM_CPU *cpu, bu32 *addr, bu32 val, bu32 mask)
++{
++  struct store *s = &BFIN_CPU_STATE.stores[BFIN_CPU_STATE.n_stores];
++  store_masks[BFIN_CPU_STATE.n_stores] = mask;
++  s->addr = addr;
++  s->val = val;
++  ++BFIN_CPU_STATE.n_stores;
+ }
+ 
+ static void
+ queue_store (SIM_CPU *cpu, bu32 *addr, bu32 val)
+ {
+   struct store *s = &BFIN_CPU_STATE.stores[BFIN_CPU_STATE.n_stores];
++  store_masks[BFIN_CPU_STATE.n_stores] = 0xFFFFFFFF;
+   s->addr = addr;
+   s->val = val;
+   TRACE_REGISTER (cpu, "queuing write %s = %#x",
+@@ -553,6 +569,11 @@
+     if (BFIN_CPU_STATE.n_stores == 20) abort (); \
+     queue_store (cpu, &(X), (Y)); \
+   } while (0)
++#define STORE_MASK(X, Y, M) \
++  do { \
++    if (BFIN_CPU_STATE.n_stores == 20) abort (); \
++    queue_store_mask (cpu, &(X), (Y), (M)); \
++  } while (0)
+ 
+ static void
+ setflags_nz (SIM_CPU *cpu, bu32 val)
+@@ -2954,14 +2975,14 @@
+       TRACE_INSN (cpu, "R%i.L = W[%s];", reg, ptr_name);
+       addr = PREG (ptr);
+       val = GET_WORD (addr);
+-      STORE (DREG (reg), (DREG (reg) & 0xFFFF0000) | val);
++      STORE_MASK (DREG (reg), val, 0xFFFF);
+     }
+   else if (aop == 2 && W == 0 && idx == ptr)
+     {
+       TRACE_INSN (cpu, "R%i.H = W[%s];", reg, ptr_name);
+       addr = PREG (ptr);
+       val = GET_WORD (addr);
+-      STORE (DREG (reg), (DREG (reg) & 0xFFFF) | (val << 16));
++      STORE_MASK (DREG (reg), val << 16, 0xFFFF0000);
+     }
+   else if (aop == 1 && W == 1 && idx == ptr)
+     {
+@@ -2989,7 +3010,7 @@
+       TRACE_INSN (cpu, "R%i.L = W[%s ++ %s];", reg, ptr_name, idx_name);
+       addr = PREG (ptr);
+       val = GET_WORD (addr);
+-      STORE (DREG (reg), (DREG (reg) & 0xFFFF0000) | val);
++      STORE_MASK (DREG (reg), val, 0xFFFF);
+       if (ptr != idx)
+ 	STORE (PREG (ptr), addr + PREG (idx));
+     }
+@@ -2998,7 +3019,7 @@
+       TRACE_INSN (cpu, "R%i.H = W[%s ++ %s];", reg, ptr_name, idx_name);
+       addr = PREG (ptr);
+       val = GET_WORD (addr);
+-      STORE (DREG (reg), (DREG (reg) & 0xFFFF) | (val << 16));
++      STORE_MASK (DREG (reg), val << 16, 0xFFFF0000);
+       if (ptr != idx)
+ 	STORE (PREG (ptr), addr + PREG (idx));
+     }
+@@ -3156,14 +3177,14 @@
+       TRACE_INSN (cpu, "R%i.L = W[I%i++];", reg, i);
+       addr = IREG (i);
+       dagadd (cpu, i, 2);
+-      STORE (DREG (reg), (DREG (reg) & 0xFFFF0000) | GET_WORD (addr));
++      STORE_MASK (DREG (reg), GET_WORD (addr), 0xFFFF);
+     }
+   else if (aop == 0 && W == 0 && m == 2)
+     {
+       TRACE_INSN (cpu, "R%i.H = W[I%i++];", reg, i);
+       addr = IREG (i);
+       dagadd (cpu, i, 2);
+-      STORE (DREG (reg), (DREG (reg) & 0xFFFF) | (GET_WORD (addr) << 16));
++      STORE_MASK (DREG (reg), GET_WORD (addr) << 16, 0xFFFF0000);
+     }
+   else if (aop == 1 && W == 0 && m == 0)
+     {
+@@ -3179,14 +3200,14 @@
+       TRACE_INSN (cpu, "R%i.L = W[I%i--];", reg, i);
+       addr = IREG (i);
+       dagsub (cpu, i, 2);
+-      STORE (DREG (reg), (DREG (reg) & 0xFFFF0000) | GET_WORD (addr));
++      STORE_MASK (DREG (reg), GET_WORD (addr), 0xFFFF);
+     }
+   else if (aop == 1 && W == 0 && m == 2)
+     {
+       TRACE_INSN (cpu, "R%i.H = W[I%i--];", reg, i);
+       addr = IREG (i);
+       dagsub (cpu, i, 2);
+-      STORE (DREG (reg), (DREG (reg) & 0xFFFF) | (GET_WORD (addr) << 16));
++      STORE_MASK (DREG (reg), GET_WORD (addr) << 16, 0xFFFF0000);
+     }
+   else if (aop == 2 && W == 0 && m == 0)
+     {
+@@ -3200,13 +3221,13 @@
+     {
+       TRACE_INSN (cpu, "R%i.L = W[I%i];", reg, i);
+       addr = IREG (i);
+-      STORE (DREG (reg), (DREG (reg) & 0xFFFF0000) | GET_WORD (addr));
++      STORE_MASK (DREG (reg), GET_WORD (addr), 0xFFFF);
+     }
+   else if (aop == 2 && W == 0 && m == 2)
+     {
+       TRACE_INSN (cpu, "R%i.H = W[I%i];", reg, i);
+       addr = IREG (i);
+-      STORE (DREG (reg), (DREG (reg) & 0xFFFF) | (GET_WORD (addr) << 16));
++      STORE_MASK (DREG (reg), GET_WORD (addr) << 16, 0xFFFF0000);
+     }
+   else if (aop == 0 && W == 1 && m == 0)
+     {
+@@ -4157,9 +4178,9 @@
+       res >>= 16;
+ 
+       if (HL)
+-	STORE (DREG (dst0), REG_H_L (res << 16, DREG (dst0)));
++	STORE_MASK (DREG (dst0), res << 16, 0xFFFF0000);
+       else
+-	STORE (DREG (dst0), REG_H_L (DREG (dst0), res));
++	STORE_MASK (DREG (dst0), res, 0xFFFF);
+ 
+       SET_ASTATREG (az, res == 0);
+       SET_ASTATREG (an, res & 0x8000);
+@@ -4188,9 +4209,9 @@
+       /* Don't worry about overflows, since we are shifting right.  */
+ 
+       if (HL)
+-	STORE (DREG (dst0), REG_H_L (res << 16, DREG (dst0)));
++	STORE_MASK (DREG (dst0), res << 16, 0xFFFF0000);
+       else
+-	STORE (DREG (dst0), REG_H_L (DREG (dst0), res));
++	STORE_MASK (DREG (dst0), res, 0xFFFF);
+ 
+       SET_ASTATREG (az, res == 0);
+       SET_ASTATREG (an, res & 0x8000);
+@@ -4225,9 +4246,9 @@
+ 	SET_ASTATREG (vs, v_i);
+ 
+       if (HL)
+-	STORE (DREG(dst0), REG_H_L (val << 16, DREG (dst0)));
++	STORE_MASK (DREG (dst0), val << 16, 0xFFFF0000);
+       else
+-	STORE (DREG(dst0), REG_H_L (DREG (dst0), val));
++	STORE_MASK (DREG (dst0), val, 0xFFFF);
+ 
+       SET_ASTATREG (an, val & 0x8000);
+       SET_ASTATREG (az, val == 0);
+@@ -4490,9 +4511,9 @@
+ 	}
+ 
+       if (!HL)
+-	STORE (DREG(dst0), REG_H_L (DREG (dst0), res));
++	STORE_MASK (DREG (dst0), res, 0xFFFF);
+       else
+-	STORE (DREG(dst0), REG_H_L (res << 16, DREG (dst0)));
++	STORE_MASK (DREG (dst0), res << 16, 0xFFFF0000);
+ 
+       SET_ASTATREG (az, res == 0);
+       SET_ASTATREG (an, res < 0);
+@@ -4533,7 +4554,8 @@
  	SET_ASTATREG (vs, 1);
        SET_ASTATREG (ac0, ac0);
        SET_ASTATREG (ac1, ac1);
@@ -10,7 +184,28 @@
      }
    else if (aop == 3 && HL == 0 && aopcde == 14 && x == 0 && s == 0)
      {
-@@ -5093,7 +5094,8 @@
+@@ -4743,9 +4765,9 @@
+ 	    {
+ 	      dreg = saturate_s32 (rnd16 (acc0) << 16, &sat);
+ 	      if (HL)
+-		STORE (DREG (dst0), REG_H_L (dreg, DREG (dst0)));
++		STORE_MASK (DREG (dst0), dreg, 0xFFFF0000);
+ 	      else
+-		STORE (DREG (dst0), REG_H_L (DREG (dst0), dreg >> 16));
++		STORE_MASK (DREG (dst0), dreg >> 16, 0xFFFF);
+ 	    }
+ 	  else		/* Dregs = A0 += A1  */
+ 	    {
+@@ -4773,7 +4795,7 @@
+   else if ((aop == 0 || aop == 1) && aopcde == 10 && x == 0 && s == 0 && HL == 0)
+     {
+       TRACE_INSN (cpu, "R%i.L = A%i.X;", dst0, aop);
+-      STORE (DREG(dst0), REG_H_L (DREG (dst0), (bs8)AXREG (aop)));
++      STORE_MASK (DREG (dst0), (bs8)AXREG (aop), 0xFFFF);
+     }
+   else if (aop == 0 && aopcde == 4 && x == 0 && HL == 0)
+     {
+@@ -5093,7 +5115,8 @@
        SET_ASTATREG (v, v);
        if (v)
  	SET_ASTATREG (vs, 1);
@@ -20,7 +215,162 @@
      }
    else if (aop == 1 && aopcde == 6 && x == 0 && s == 0 && HL == 0)
      {
-@@ -6104,8 +6106,9 @@
+@@ -5271,9 +5294,9 @@
+ 	}
+ 
+       if ((HLs & 2) == 0)
+-	STORE (DREG (dst0), REG_H_L (DREG (dst0), val));
++	STORE_MASK (DREG (dst0), val, 0xFFFF);
+       else
+-	STORE (DREG (dst0), REG_H_L (val << 16, DREG (dst0)));
++	STORE_MASK (DREG (dst0), val << 16, 0xFFFF0000);
+     }
+   else if (sop == 2 && sopcde == 0)
+     {
+@@ -5295,9 +5318,9 @@
+ 	val = val << shft;
+ 
+       if ((HLs & 2) == 0)
+-	STORE (DREG(dst0), REG_H_L (DREG (dst0), val));
++	STORE_MASK (DREG (dst0), val, 0xFFFF);
+       else
+-	STORE (DREG(dst0), REG_H_L (val << 16, DREG (dst0)));
++	STORE_MASK (DREG (dst0), val << 16, 0xFFFF0000);
+ 
+       SET_ASTATREG (az, !((val & 0xFFFF0000) == 0) || ((val & 0xFFFF) == 0));
+       SET_ASTATREG (an, (!!(val & 0x80000000)) ^ (!!(val & 0x8000)));
+@@ -5483,19 +5506,19 @@
+     {
+       bu32 sv1 = DREG (src1);
+       TRACE_INSN (cpu, "R%i.L = SIGNBITS R%i;", dst0, src1);
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), signbits (sv1, 32)));
++      STORE_MASK (DREG (dst0), signbits (sv1, 32), 0xFFFF);
+     }
+   else if (sop == 1 && sopcde == 5)
+     {
+       bu32 sv1 = DREG (src1);
+       TRACE_INSN (cpu, "R%i.L = SIGNBITS R%i.L;", dst0, src1);
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), signbits (sv1, 16)));
++      STORE_MASK (DREG (dst0), signbits (sv1, 16), 0xFFFF);
+     }
+   else if (sop == 2 && sopcde == 5)
+     {
+       bu32 sv1 = DREG (src1);
+       TRACE_INSN (cpu, "R%i.L = SIGNBITS R%i.H;", dst0, src1);
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), signbits (sv1 >> 16, 16)));
++      STORE_MASK (DREG (dst0), signbits (sv1 >> 16, 16), 0xFFFF);
+     }
+   else if ((sop == 0 || sop == 1) && sopcde == 6)
+     {
+@@ -5503,13 +5526,13 @@
+       TRACE_INSN (cpu, "R%i.L = SIGNBITS A%i;", dst0, sop);
+       acc <<= 32;
+       acc |= AWREG (sop);
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), signbits (acc, 40) & 0xFFFF));
++      STORE_MASK (DREG (dst0), signbits (acc, 40) & 0xFFFF, 0xFFFF);
+     }
+   else if (sop == 3 && sopcde == 6)
+     {
+       bu32 v = ones (DREG (src1));
+       TRACE_INSN (cpu, "R%i.L = ONES R%i;", dst0, src1);
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), v));
++      STORE_MASK (DREG (dst0), v, 0xFFFF);
+     }
+   else if (sop == 0 && sopcde == 7)
+     {
+@@ -5523,7 +5546,7 @@
+ 	dst_lo = sv1;
+       else
+ 	dst_lo = sv0;
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), dst_lo));
++      STORE_MASK (DREG (dst0), dst_lo, 0xFFFF);
+     }
+   else if (sop == 1 && sopcde == 7)
+     {
+@@ -5549,7 +5572,7 @@
+ 	  tmp = tmp_lo;
+ 	else
+ 	  tmp = src0_lo;
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), tmp));
++      STORE_MASK (DREG (dst0), tmp, 0xFFFF);
+     }
+   else if (sop == 2 && sopcde == 7)
+     {
+@@ -5562,9 +5585,9 @@
+       tmp = signbits (DREG (src1) & 0xFFFF, 16);
+ 
+       if ((tmp & 0xf) < (src0_lo & 0xf))
+-	STORE (DREG (dst0), REG_H_L (DREG (dst0), tmp));
++	STORE_MASK (DREG (dst0), tmp, 0xFFFF);
+       else
+-	STORE (DREG (dst0), REG_H_L (DREG (dst0), src0_lo));
++	STORE_MASK (DREG (dst0), src0_lo, 0xFFFF);
+     }
+   else if (sop == 3 && sopcde == 7)
+     {
+@@ -5576,9 +5599,9 @@
+       tmp = signbits ((DREG (src1) & 0xFFFF0000) >> 16, 16);
+ 
+       if ((tmp & 0xf) < (src0_lo & 0xf))
+-	STORE (DREG (dst0), REG_H_L (DREG (dst0), tmp));
++	STORE_MASK (DREG (dst0), tmp, 0xFFFF);
+       else
+-	STORE (DREG (dst0), REG_H_L (DREG (dst0), src0_lo));
++	STORE_MASK (DREG (dst0), src0_lo, 0xFFFF);
+     }
+   else if (sop == 0 && sopcde == 8)
+     {
+@@ -5645,7 +5668,7 @@
+ 	out = sL;
+ 
+       SET_AREG (0, acc0);
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), out));
++      STORE_MASK (DREG (dst0), out, 0xFFFF);
+     }
+   else if ((sop == 2 || sop == 3) && sopcde == 9)
+     {
+@@ -5754,7 +5777,7 @@
+ 
+       acc0 <<= 1;
+       SET_CCREG (xor_reduce (acc0, DREG (src0)));
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), CCREG));
++      STORE_MASK (DREG (dst0), CCREG, 0xFFFF);
+       SET_AREG (0, acc0);
+     }
+   else if (sop == 1 && sopcde == 11)
+@@ -5764,7 +5787,7 @@
+       TRACE_INSN (cpu, "R%i.L = CC = BXOR (A0, R%i);", dst0, src0);
+ 
+       SET_CCREG (xor_reduce (acc0, DREG (src0)));
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), CCREG));
++      STORE_MASK (DREG (dst0), CCREG, 0xFFFF);
+     }
+   else if (sop == 0 && sopcde == 12)
+     {
+@@ -5785,7 +5808,7 @@
+ 
+       SET_CCREG (CCREG ^ xor_reduce (acc0, acc1));
+       acc0 = (acc0 << 1) | CCREG;
+-      STORE (DREG (dst0), REG_H_L (DREG (dst0), CCREG));
++      STORE_MASK (DREG (dst0), CCREG, 0xFFFF);
+     }
+   else if ((sop == 0 || sop == 1 || sop == 2) && sopcde == 13)
+     {
+@@ -5923,10 +5946,11 @@
+ 	illegal_instruction (cpu);
+ 
+       v = DREG (dst0);
++      (void) v;
+       if (HLs & 2)
+-	STORE (DREG (dst0), (v & 0xFFFF) | (result << 16));
++	STORE_MASK (DREG (dst0), result << 16, 0xFFFF0000);
+       else
+-	STORE (DREG (dst0), (v & 0xFFFF0000) | result);
++	STORE_MASK (DREG (dst0), result, 0xFFFF);
+     }
+   else if (sop == 2 && sopcde == 3 && (HLs == 1 || HLs == 0))
+     {
+@@ -6104,8 +6128,9 @@
  
        TRACE_INSN (cpu, "R%i = R%i >> %i;", dst0, src1, count);
  
@@ -30,4 +380,13 @@
 +	STORE (DREG (dst0), lshift (cpu, DREG (src1), -count, 32, 0, 0));
        else
  	STORE (DREG (dst0), lshiftrt (cpu, DREG (src1), count, 32));
+     }
+@@ -6458,7 +6483,7 @@
+   for (i = 0; i < BFIN_CPU_STATE.n_stores; i++)
+     {
+       bu32 *addr = BFIN_CPU_STATE.stores[i].addr;
+-      *addr = BFIN_CPU_STATE.stores[i].val;
++      *addr = (*addr & ~store_masks[i]) | (BFIN_CPU_STATE.stores[i].val & store_masks[i]);
+       TRACE_REGISTER (cpu, "dequeuing write %s = %#x",
+ 		      get_store_name (cpu, addr), *addr);
      }

@@ -92,6 +92,7 @@ private:
     void VerifyAgainst(u32 pc, const CpuState& interp, const std::map<uint32_t, uint8_t>& writes);
     uint32_t interpFirst_ = 0; u32 interpLo_ = 0, interpHi_ = 0xFFFFFFFF;
     std::unordered_map<u32, uint32_t> interpVisits_;
+    uint64_t interpNs_ = 0, syncWaitNs_ = 0, syncWaitMaxNs_ = 0;
     uint64_t interpSteps_ = 0, interpBails_ = 0, statsInterpSteps_ = 0, statsInterpBails_ = 0;
     void Pace();
     uint64_t paceStartNs_ = 0, paceCalls_ = 0, statsNextNs_ = 0, statsSleptNs_ = 0, statsMaxLagNs_ = 0;

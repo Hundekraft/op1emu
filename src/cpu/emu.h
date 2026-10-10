@@ -54,6 +54,9 @@ public:
     void* MemoryMap(u32 addr);
     // If addr lies in a plain MemoryDevice, its host base pointer and size (else false).
     bool DirectRange(u32 addr, u8** host, u32* size);
+    // The plain memory device containing addr (no MMRs, no read/write hooks inside): its host base, guest base
+    // and size. For fast direct access (the interpreter).
+    bool PlainRange(u32 addr, u8** host, u32* base, u32* size);
 
     std::array<u8*, NUM_PAGE_TABLE_ENTRIES>& PageTable() { return *pageTable; }
     FastMem& GetFastMem() { return *fastmem; }

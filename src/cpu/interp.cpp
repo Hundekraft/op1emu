@@ -2,6 +2,7 @@
 
 #ifdef OP1EMU_INTERP
 #include "interp_glue.h"
+#include <algorithm>
 #include <cstring>
 
 namespace {
@@ -13,7 +14,17 @@ void Write16(void* m, uint32_t a, uint16_t v) { static_cast<Memory*>(m)->write16
 void Write32(void* m, uint32_t a, uint32_t v) { static_cast<Memory*>(m)->write32(a, v); }
 }  // namespace
 
+namespace {
+Interpreter::Range g_ranges[12];
+int g_nranges = 0;
+}
+
 bool Interpreter::Available() { return true; }
+
+void Interpreter::SetDirectRanges(const Range* ranges, int count) {
+    g_nranges = std::min(count, 12);
+    for (int i = 0; i < g_nranges; ++i) g_ranges[i] = ranges[i];
+}
 
 unsigned Interpreter::Run(CpuState* cpu, Memory* mem, bool userMode, unsigned maxSteps) {
     interp_glue_regs r;
@@ -33,9 +44,12 @@ unsigned Interpreter::Run(CpuState* cpu, Memory* mem, bool userMode, unsigned ma
     r.pc = cpu->pc; r.usp = cpu->usp; r.ksp = cpu->ksp; r.seqstat = cpu->seqstat; r.syscfg = cpu->syscfg;
     r.astat = astat_compose(cpu);
 
-    const uint32_t limit = mem->rawmem_limit();
-    const interp_glue_mem m{mem, Read8, Read16, Read32, Write8, Write16, Write32,
-                            limit ? reinterpret_cast<uint8_t*>(mem->fast_base()) : nullptr, limit};
+    interp_glue_mem m{mem, Read8, Read16, Read32, Write8, Write16, Write32, {}, 0};
+    // Direct ranges only for the real emulator memory (the verify check passes an overlay).
+    if (mem->rawmem_limit() || mem->fast_base()) {
+        for (int i = 0; i < g_nranges; ++i) m.ranges[i] = {g_ranges[i].base, g_ranges[i].size, g_ranges[i].host};
+        m.n_ranges = g_nranges;
+    }
     const unsigned steps = interp_glue_run(&r, &m, userMode ? 1 : 0, maxSteps);
     if (!steps) return 0;
 
@@ -60,5 +74,6 @@ unsigned Interpreter::Run(CpuState* cpu, Memory* mem, bool userMode, unsigned ma
 }
 #else
 bool Interpreter::Available() { return false; }
+void Interpreter::SetDirectRanges(const Range*, int) {}
 unsigned Interpreter::Run(CpuState*, Memory*, bool, unsigned) { return 0; }
 #endif

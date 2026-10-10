@@ -32,11 +32,13 @@ unsigned
 sim_core_read_buffer (SIM_DESC sd, sim_cpu *cpu, unsigned map, void *buffer, address_word addr, unsigned len)
 {
   (void) sd; (void) cpu; (void) map;
-  if (glue_mem->raw_base && addr < glue_mem->raw_limit && len <= glue_mem->raw_limit - addr)
-    {
-      memcpy (buffer, glue_mem->raw_base + addr, len);
-      return len;
-    }
+  for (int r = 0; r < glue_mem->n_ranges; r++)
+    if (addr - glue_mem->ranges[r].lo < glue_mem->ranges[r].size
+        && len <= glue_mem->ranges[r].size - (addr - glue_mem->ranges[r].lo))
+      {
+        memcpy (buffer, glue_mem->ranges[r].host + (addr - glue_mem->ranges[r].lo), len);
+        return len;
+      }
   if (addr >= 0xFFC00000u)
     mmr_touched = 1;
   switch (len)
@@ -55,11 +57,13 @@ unsigned
 sim_core_write_buffer (SIM_DESC sd, sim_cpu *cpu, unsigned map, const void *buffer, address_word addr, unsigned len)
 {
   (void) sd; (void) cpu; (void) map;
-  if (glue_mem->raw_base && addr < glue_mem->raw_limit && len <= glue_mem->raw_limit - addr)
-    {
-      memcpy (glue_mem->raw_base + addr, buffer, len);
-      return len;
-    }
+  for (int r = 0; r < glue_mem->n_ranges; r++)
+    if (addr - glue_mem->ranges[r].lo < glue_mem->ranges[r].size
+        && len <= glue_mem->ranges[r].size - (addr - glue_mem->ranges[r].lo))
+      {
+        memcpy (glue_mem->ranges[r].host + (addr - glue_mem->ranges[r].lo), buffer, len);
+        return len;
+      }
   if (addr >= 0xFFC00000u)
     mmr_touched = 1;
   switch (len)
@@ -166,7 +170,7 @@ interp_glue_run (struct interp_glue_regs *regs, const struct interp_glue_mem *me
       bu16 iw0;
       int flow;
 
-      iw0 = mem->read16 (mem->ctx, pc);
+      sim_core_read_buffer (&sim_sd, cpu, exec_map, &iw0, pc, 2);
       /* IDLE needs op1emu's idle handling (wait for an interrupt): leave it to the JIT. */
       if (iw0 == 0x0020)
         break;

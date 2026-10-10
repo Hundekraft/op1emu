@@ -506,13 +506,20 @@ HaltReason BlackFinCpu::Run() {
             // starts come back to the JIT; stepping alone would hand it every instruction address.
             bool ok = false;
             if (core_->not_ready()) {
+                const auto t0 = std::chrono::steady_clock::now();
                 const uint32_t steps = Interpreter::Run(cpuState_.get(), bcoreMemory_.get(), cec_is_user_mode(), 256);
                 interpSteps_ += steps;
                 if (steps) {
                     ok = true;
+                    if (stats_) interpNs_ += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
                 } else {
                     ++interpBails_;
                     ok = core_->run_sync(cpuState_->pc);
+                    if (stats_) {
+                        const uint64_t w = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+                        syncWaitNs_ += w;
+                        syncWaitMaxNs_ = std::max(syncWaitMaxNs_, w);
+                    }
                 }
             }
             if (!ok) {
@@ -638,11 +645,11 @@ void BlackFinCpu::ApplyOverlay() {
 void BlackFinCpu::VerifyAgainst(u32 pc, const CpuState& in, const std::map<uint32_t, uint8_t>& writes) {
     const CpuState& j = *cpuState_;
     std::string diff;
-    char b[96];
-    auto cmp = [&](const char* name, uint32_t a, uint32_t c) {
-        if (a != c) { snprintf(b, sizeof b, " %s interp=%08x jit=%08x", name, a, c); diff += b; }
+    char b[96], name[8];
+    auto cmp = [&](const char* n, uint32_t a, uint32_t c) {
+        if (a != c) { snprintf(b, sizeof b, " %s interp=%08x jit=%08x", n, a, c); diff += b; }
     };
-    for (int i = 0; i < 16; ++i) { snprintf(b, sizeof b, "%s%d", i < 8 ? "R" : "P", i < 8 ? i : i - 8); cmp(b, in.dpregs[i], j.dpregs[i]); }
+    for (int i = 0; i < 16; ++i) { snprintf(name, sizeof name, "%s%d", i < 8 ? "R" : "P", i < 8 ? i : i - 8); cmp(name, in.dpregs[i], j.dpregs[i]); }
     for (int i = 0; i < 4; ++i) { cmp("I", in.iregs[i], j.iregs[i]); cmp("M", in.mregs[i], j.mregs[i]); cmp("B", in.bregs[i], j.bregs[i]); cmp("L", in.lregs[i], j.lregs[i]); }
     for (int i = 0; i < 2; ++i) { cmp("AX", in.ax[i], j.ax[i]); cmp("AW", in.aw[i], j.aw[i]); cmp("LC", in.lc[i], j.lc[i]); cmp("LT", in.lt[i], j.lt[i]); cmp("LB", in.lb[i], j.lb[i]); }
     cmp("ASTAT", astat_compose(&in), astat_compose(&j));
@@ -658,6 +665,16 @@ void BlackFinCpu::VerifyAgainst(u32 pc, const CpuState& in, const std::map<uint3
 }
 
 void BlackFinCpu::UpdateAsyncCompile() {
+    // Direct memory for the interpreter: SDRAM, L1 data A/B (+cache), L1 code, scratchpad.
+    {
+        std::vector<Interpreter::Range> ranges;
+        for (u32 a : {0x00000000u, 0xFF800000u, 0xFF804000u, 0xFF900000u, 0xFF904000u, 0xFFA00000u, 0xFFA08000u,
+                      0xFFA10000u, 0xFFB00000u}) {
+            u8* host = nullptr; u32 base = 0, size = 0;
+            if (emulator.PlainRange(a, &host, &base, &size)) ranges.push_back({base, size, host});
+        }
+        Interpreter::SetDirectRanges(ranges.data(), (int)ranges.size());
+    }
     bool on = Interpreter::Available() && (realtime_ || !time_.Deterministic());
     if (const char* e = getenv("OP1EMU_ASYNC_JIT")) on = Interpreter::Available() && e[0] == '1';
     if (core_) core_->set_async_compile(on);
@@ -700,8 +717,10 @@ void BlackFinCpu::Pace() {
                 (tns - statsTranslateNs_) / 1e6);
         statsTranslateNs_ = tns; statsTranslateN_ = tn;
         if (interpSteps_ != statsInterpSteps_ || interpBails_ != statsInterpBails_)
-            LogInfo("interpreted %llu instructions while compiling (%llu left to the JIT)",
-                    (unsigned long long)(interpSteps_ - statsInterpSteps_), (unsigned long long)(interpBails_ - statsInterpBails_));
+            LogInfo("interpreted %llu instructions in %.1f ms while compiling; %llu left to the JIT, waited %.1f ms (max %.1f)",
+                    (unsigned long long)(interpSteps_ - statsInterpSteps_), interpNs_ / 1e6,
+                    (unsigned long long)(interpBails_ - statsInterpBails_), syncWaitNs_ / 1e6, syncWaitMaxNs_ / 1e6);
+        interpNs_ = syncWaitNs_ = syncWaitMaxNs_ = 0;
         statsInterpSteps_ = interpSteps_; statsInterpBails_ = interpBails_;
         if (verifyHi_) LogInfo("verify: %llu blocks equal, %llu mismatches", (unsigned long long)verifyOk_, (unsigned long long)verifyBad_);
         LogInfo("now: pc %#x ivg %d ipend %#x ilat %#x imask %#x", cpuState_->pc, cec_current_ivg(), cec_ipend(), cec_ilat(),

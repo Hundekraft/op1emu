@@ -168,6 +168,20 @@ void Emulator::RemoveSoftwareBreak(u32 addr)
 {
 }
 
+bool Emulator::PlainRange(u32 addr, u8** host, u32* base, u32* size)
+{
+    if (addr >= 0xFFC00000u) return false;
+    auto* dev = dynamic_cast<MemoryDevice*>(get_device(addr, deviceSegments));
+    if (!dev || !dev->HostBase()) return false;
+    const u32 lo = dev->BaseAddress(), hi = dev->BaseAddress() + dev->Size();
+    for (const auto& h : readHooks) if (h.first >= lo && h.first < hi) return false;
+    for (const auto& h : writeHooks) if (h.first >= lo && h.first < hi) return false;
+    *host = dev->HostBase();
+    *base = lo;
+    *size = dev->Size();
+    return true;
+}
+
 bool Emulator::DirectRange(u32 addr, u8** host, u32* size)
 {
     auto* dev = dynamic_cast<MemoryDevice*>(get_device(addr, deviceSegments));

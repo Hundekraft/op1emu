@@ -16,9 +16,9 @@ struct interp_glue_mem {
   void (*write8) (void *ctx, uint32_t addr, uint8_t v);
   void (*write16) (void *ctx, uint32_t addr, uint16_t v);
   void (*write32) (void *ctx, uint32_t addr, uint32_t v);
-  /* Guest addresses below raw_limit are plain memory at raw_base + addr (may be 0 = none). */
-  uint8_t *raw_base;
-  uint32_t raw_limit;
+  /* Plain memory reachable directly: guest [lo, lo + size) is host[0, size). */
+  struct { uint32_t lo, size; uint8_t *host; } ranges[12];
+  int n_ranges;
 };
 
 /* The registers one instruction can read or change; ASTAT as the architectural 32-bit word. */

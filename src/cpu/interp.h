@@ -13,4 +13,7 @@ public:
     // Returns how many ran (cpu->packets too). 0: nothing changed, the instruction needs the CEC, the MMU,
     // an exception or IDLE; run the block through the JIT instead.
     static unsigned Run(CpuState* cpu, Memory* mem, bool userMode, unsigned maxSteps);
+    // Plain memory the interpreter may access directly (guest base, size, host pointer); see Emulator::PlainRange.
+    struct Range { uint32_t base, size; uint8_t* host; };
+    static void SetDirectRanges(const Range* ranges, int count);
 };
