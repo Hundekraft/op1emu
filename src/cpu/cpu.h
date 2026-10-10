@@ -147,6 +147,12 @@ protected:
         return cpuThreadKnown_.load(std::memory_order_acquire) && std::this_thread::get_id() == cpuThreadId_;
     }
     void ProcessLane(std::vector<Event>& lane);
+    // IVGs with a raise already in cpuLane_ for the next pass. All raises queued between two passes run in
+    // the same pass, and in supervisor mode cec_raise(ivg) only sets ILAT bit ivg and the pending flag, so a
+    // second one there is a no-op and is not queued. Off for good once the guest is seen in user mode, where
+    // cec_raise can raise an exception instead.
+    uint32_t laneRaiseMask_ = 0;
+    bool sawUserMode_ = false;
     void QueueRaise(int ivg);
     std::recursive_mutex eventQueueMutex;
     std::atomic<size_t> eventCount_{0};     // eventQueue.size(), readable without the lock

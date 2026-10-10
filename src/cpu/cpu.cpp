@@ -36,6 +36,7 @@
 // bcore CEC functions (extern "C" in bcore's src/cec.h)
 extern "C" void cec_raise(CpuState* cpu, uint32_t ivg);
 extern "C" void cec_check_pending(CpuState* cpu);
+extern "C" bool cec_is_user_mode();
 
 // bcore EVT init (extern in bcore's src/evt.h)
 void evt_init();
@@ -520,6 +521,10 @@ void BlackFinCpu::QueueEvent(const std::function<void()>& event, std::chrono::na
 void BlackFinCpu::QueueRaise(int ivg) {
     // Same 1 ns default delay as QueueEvent: the raise is delivered on the next ProcessEvents.
     if (OnCpuThread()) {
+        if (!sawUserMode_ && cec_is_user_mode()) sawUserMode_ = true;
+        const uint32_t bit = 1u << (ivg & 31);
+        if (!sawUserMode_ && (laneRaiseMask_ & bit)) return;
+        laneRaiseMask_ |= bit;
         cpuLane_.push_back({std::chrono::nanoseconds(1), ivg, {}});
         return;
     }
@@ -534,6 +539,7 @@ void BlackFinCpu::ProcessEvents() {
         cpuThreadKnown_.store(true, std::memory_order_release);
     }
     if (!cpuLane_.empty()) ProcessLane(cpuLane_);
+    laneRaiseMask_ = 0;  // raises queued from here on run in the pass after this one
     // Fast path: nearly every block runs with no events from other threads. Skip the lock.
     if (eventCount_.load(std::memory_order_acquire) != 0) {
         std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
