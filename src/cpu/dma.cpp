@@ -49,6 +49,7 @@ protected:
     u32 nextDescPtr = 0;    // 0x00
     u32 startAddr = 0;      // 0x04
     u16 xCount = 0;         // 0x10
+    uint64_t debugCompletions_ = 0;
     int16_t xModify = 0;   // 0x14
     u16 yCount = 0;         // 0x18
     int16_t yModify = 0;   // 0x1C
@@ -262,6 +263,9 @@ u32 DMAChannel::Transfer(DMABus* bus, int elementBytes, u32 totalBytes) {
                 transferComplete = false;
             }
         }
+        static const bool rateLog = getenv("OP1EMU_SPORT_RATE") != nullptr;   // debug: completions vs SPORT frames
+        if (rateLog && peripheralType == DMAPeripheralSPORT0Tx && ++debugCompletions_ % 689 == 0)
+            LogInfo("DMA %s (SPORT0 TX): %llu completions", Name().c_str(), (unsigned long long)debugCompletions_);
         if (dataInterruptEnabled) {
             if (!mode2D || mode2DInterruptEachRow) {
                 TriggerInterrupt(1);

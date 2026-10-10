@@ -208,8 +208,12 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     devices.emplace_back(portH);
 
     sic = std::make_shared<SIC>(0xFFC00100);
+    // System interrupts are levels; the core latches one into ILAT only while its IVG is not being serviced.
+    // Forwarding a still-asserted source during its own handler (SIC re-forwards on every line change) latched
+    // it again, so the handler ran twice: the TX DMA handler rendered two audio blocks per 64-frame buffer.
+    // AfterBlock re-forwards when an IPEND bit clears (RTI), so a level that is still asserted is taken again.
     sic->SetInterruptForwardCallback([this](int ivg, int level) {
-        if (level) QueueRaise(ivg);
+        if (level && !(cec_ipend() & (1u << (ivg & 31)))) QueueRaise(ivg);
     });
     devices.push_back(sic);
     nfc->SetIVGResolver([this]() { return sic->GetIVG(IRQ_NFC); });
@@ -584,6 +588,11 @@ void BlackFinCpu::Pace() {
 // Everything that happens between two guest blocks: interrupts, device polling, timers, events.
 void BlackFinCpu::AfterBlock(uint64_t cyclesElapsed) {
     cec_check_pending(cpuState_.get());
+    {
+        const uint32_t ipend = cec_ipend();
+        if (lastIpend_ & ~ipend) sic->ForwardInterrupts();
+        lastIpend_ = ipend;
+    }
 
     // Get active IVG from CEC
     int ivg = cec_current_ivg();
@@ -769,8 +778,11 @@ void BlackFinCpu::ProcessLane(std::vector<Event>& lane) {
     for (auto& e : lane)
         if (e.delay <= std::chrono::nanoseconds(0)) due.push_back(std::move(e));
     for (auto& e : due) {
-        if (e.raiseIvg >= 0) cec_raise(cpuState_.get(), e.raiseIvg);
-        else e.fn();
+        // A SIC level (IVG 7..15) queued before its handler started is not latched again once the handler runs
+        // (see SetInterruptForwardCallback); AfterBlock re-forwards it after the RTI if it is still asserted.
+        if (e.raiseIvg >= 0) {
+            if (!(e.raiseIvg >= 7 && (cec_ipend() & (1u << (e.raiseIvg & 31))))) cec_raise(cpuState_.get(), e.raiseIvg);
+        } else e.fn();
 #ifdef ENABLE_PROFILING
         ++eventsDelivered_;
 #endif

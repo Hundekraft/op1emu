@@ -13,7 +13,11 @@ class TimeSource;
 
 class SPORT : public RegisterDevice, public DMABus {
 public:
-    static constexpr uint32_t kSampleRateHz = 44100;
+    // R246 sends 32-bit words, two per frame (primary + secondary, or L/R), and renders a 128-sample block per
+    // 128-word TX buffer. One buffer must last 128/44100 s for the firmware's 44.1 kHz pitch tables and its
+    // tape speed to come out right, so the link moves 44100 words/s = 22050 two-word frames/s. (At 44100
+    // frames/s the tape counter ran 19.4 s per 10 s and every note an octave high.)
+    static constexpr uint32_t kSampleRateHz = 22050;
     using AudioOutputCallback = std::function<void(const void* data, size_t samples, int channels, int bitsPerSample)>;
     using AudioInputCallback = std::function<size_t(void* data, size_t samples, int channels, int bitsPerSample)>;
 
@@ -81,7 +85,7 @@ protected:
     bool dmaRxActive_ = false;
 
     // Frame rate in Hz. R246 runs SPORT0 from external codec clocks (TCR1 ITCLK/ITFS clear), so the
-    // registers don't give it; 44.1 kHz is measured from note pitch (C4 = 169 samples per cycle).
+    // registers don't give it; see kSampleRateHz.
     uint32_t sampleRateHz_ = kSampleRateHz;
 
     // Raw clock/sync config (debug: logged when DMA starts) and OP1EMU_AUDIO_DUMP raw sample dump.

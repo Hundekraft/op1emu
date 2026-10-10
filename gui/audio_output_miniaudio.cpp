@@ -8,8 +8,8 @@
 
 static constexpr ma_uint32 SAMPLE_RATE = SPORT::kSampleRateHz;  // the guest's rate; miniaudio converts if needed
 static constexpr ma_uint32 CHANNELS = 2;
-static constexpr ma_uint32 RING_BUFFER_FRAMES = 8192;  // ~186 ms
-static constexpr ma_uint32 kPrefillFrames = 2048;      // ~46 ms of latency against guest pacing jitter
+static constexpr ma_uint32 RING_BUFFER_FRAMES = 4096;  // ~186 ms at 22.05 kHz
+static constexpr ma_uint32 kPrefillFrames = 1024;      // ~46 ms of latency against guest pacing jitter
 
 MiniaudioOutput::MiniaudioOutput()
     : device_(nullptr), ringBuffer_(nullptr) {

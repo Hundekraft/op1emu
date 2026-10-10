@@ -24,9 +24,11 @@ public:
     // A peripheral interrupt is asserted and enabled for wake-up (SIC_ISR & SIC_IWR): ends IDLE even if masked.
     bool WakeupPending() const { return (isr[0] & iwr[0]) || (isr[1] & iwr[1]); }
 
+    // Forward every asserted, unmasked source again (after an RTI: a level still asserted is taken again).
+    void ForwardInterrupts();
+
 private:
     void InitRegisters();
-    void ForwardInterrupts();
 
     u16 rvect = 0;
     u8 bmode = 0;

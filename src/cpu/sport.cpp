@@ -239,6 +239,10 @@ u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
     }
 
     totalTxSamplesDelivered_ += available;
+    static const bool rateLog = getenv("OP1EMU_SPORT_RATE") != nullptr;   // debug: frames per guest second
+    if (rateLog && totalTxSamplesDelivered_ / sampleRateHz_ != (totalTxSamplesDelivered_ - available) / sampleRateHz_)
+        LogInfo("SPORT%d TX: %llu frames at guest %.3f s since DMA start", sportNumber,
+                (unsigned long long)totalTxSamplesDelivered_, (time_.Nanoseconds() - dmaTxStartNs_) / 1e9);
     return static_cast<u32>(available * frameSize);
 }
 

@@ -82,6 +82,7 @@ private:
     void Pace();
     uint64_t paceStartNs_ = 0, paceCalls_ = 0, statsNextNs_ = 0, statsSleptNs_ = 0, statsMaxLagNs_ = 0;
     u32 breakPc_ = 0;
+    uint32_t lastIpend_ = 0;
     unsigned breakHitsLeft_ = 4, breakHit_ = 0;
     void OnBreak();
     void ApplyOverlay();
