@@ -16,14 +16,19 @@ void USBIPServer::Start()
     server->on<uvw::listen_event>([this] (const uvw::listen_event&, uvw::tcp_handle& srv) {
         auto client = srv.parent().resource<uvw::tcp_handle>();
 
-        client->on<uvw::close_event>([ptr = srv.shared_from_this()] (const uvw::close_event&, uvw::tcp_handle&) { ptr->close(); });
+        // Keep listening after a client leaves so a host can reconnect (re-plug), and start the next
+        // session from a clean protocol state.
+        client->on<uvw::close_event>([this] (const uvw::close_event&, uvw::tcp_handle&) {
+            buffer.pop(buffer.size());
+            state = USBIPState::WaitCommand;
+        });
         client->on<uvw::end_event>([] (const uvw::end_event&, uvw::tcp_handle& client) { client.close(); });
         client->on<uvw::data_event>([this] (const uvw::data_event& event, uvw::tcp_handle& client) { OnClientDataEvent(event, client); });
 
         srv.accept(*client);
         client->read();
     });
-    server->bind("0.0.0.0", USBIP_SERVER_PORT);
+    server->bind("127.0.0.1", USBIP_SERVER_PORT);
     server->listen();
 }
 
