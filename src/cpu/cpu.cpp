@@ -115,6 +115,7 @@ public:
 BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     if (const char* b = getenv("OP1EMU_BATCH")) batchCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
     if (const char* b = getenv("OP1EMU_BATCH_AFTER")) batchAfterCycles_ = strtoull(b, nullptr, 10);
+    panicLog_ = getenv("OP1_PANIC_LOG") != nullptr;
     if (const char* b = getenv("OP1EMU_IDLE_STEP")) idleStepCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
     cpuState_ = std::make_unique<CpuState>();
     memset(cpuState_.get(), 0, sizeof(CpuState));
@@ -357,13 +358,9 @@ HaltReason BlackFinCpu::Run() {
         const uint32_t blockPc = cpuState_->pc;
         if (profiler_) profiler_->BeforeRun(blockPc);
 #endif
-        if ((cpuState_->pc == 0x01A5E364 || cpuState_->pc == 0x01A5E3B0) && getenv("OP1_PANIC_DEBUG")) {  // TEMP
-            static int n364 = 0, n3b0 = 0;
-            int& n = cpuState_->pc == 0x01A5E364 ? n364 : n3b0;
-            if (n++ < 3) fprintf(stderr, "HEAP %s at cycle %llu ivg=%d rets=0x%08x\n", cpuState_->pc == 0x01A5E364 ? "INIT" : "NEW",
-                                 (unsigned long long)time_.Cycles(), cec_current_ivg(), cpuState_->rets);
-        }
-        if (cpuState_->pc == 0x01919AA8 && getenv("OP1_PANIC_DEBUG")) {  // TEMP: firmware panic(fmt, a, b)
+        // R246's panic(fmt, ...) at 0x01919AA8: log the format and first arguments (OP1_PANIC_LOG=1).
+        // Most early-boot panics are suppressed by the firmware itself; a fatal one halts at 0x0191995A.
+        if (cpuState_->pc == 0x01919AA8 && panicLog_) {
             auto str = [&](u32 a) { std::string m; for (int k = 0; k < 200; ++k) { char c = (char)emulator.MemoryRead8(a + k); if (!c) break; m += c; } return m; };
             fprintf(stderr, "FIRMWARE PANIC: fmt='%s' r1=0x%08x ('%s') r2=0x%08x r3=0x%08x rets=0x%08x ipend_ivg=%d\n", str(cpuState_->dpregs[0]).c_str(),
                     cpuState_->dpregs[1], str(cpuState_->dpregs[1]).c_str(), cpuState_->dpregs[2], cpuState_->dpregs[3], cpuState_->rets, cec_current_ivg());

@@ -75,6 +75,7 @@ private:
     uint64_t lastSclkTicks_ = 0;
     uint64_t batchAfterCycles_ = UINT64_MAX;  // batching starts at this guest cycle (OP1EMU_BATCH_AFTER)
     bool batchArmed_ = false;
+    bool panicLog_ = false;
     static constexpr u32 kMainDisplayPc = 0x019AB8B6;  // R246 main display routine (profiling mark)
     uint64_t idleStepCycles_ = 256;  // guest cycles per idle step (OP1EMU_IDLE_STEP)
     void IdleUntilInterrupt();
