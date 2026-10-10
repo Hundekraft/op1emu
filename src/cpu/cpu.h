@@ -3,6 +3,7 @@
 #include "emu.h"
 #include "time_source.h"
 #include <atomic>
+#include <thread>
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -136,6 +137,16 @@ protected:
     };
     std::vector<Event> eventQueue;
     std::vector<Event> dueEvents_;  // scratch for ProcessEvents
+    // Events queued by the CPU thread itself (raises from device polling and MMR writes, NAND busy, ...)
+    // go to this unlocked lane, in order; other threads use eventQueue under the mutex. Each lane keeps
+    // its own order; how the two interleave depends on host timing anyway.
+    std::vector<Event> cpuLane_;
+    std::atomic<bool> cpuThreadKnown_{false};
+    std::thread::id cpuThreadId_;
+    bool OnCpuThread() const {
+        return cpuThreadKnown_.load(std::memory_order_acquire) && std::this_thread::get_id() == cpuThreadId_;
+    }
+    void ProcessLane(std::vector<Event>& lane);
     void QueueRaise(int ivg);
     std::recursive_mutex eventQueueMutex;
     std::atomic<size_t> eventCount_{0};     // eventQueue.size(), readable without the lock

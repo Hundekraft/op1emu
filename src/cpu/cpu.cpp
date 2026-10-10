@@ -508,52 +508,68 @@ u32 BlackFinCpu::PC() {
 }
 
 void BlackFinCpu::QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay) {
+    if (OnCpuThread()) {
+        cpuLane_.push_back({delay, -1, event});
+        return;
+    }
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
     eventQueue.push_back({delay, -1, event});
     eventCount_.store(eventQueue.size(), std::memory_order_release);
 }
 
 void BlackFinCpu::QueueRaise(int ivg) {
-    std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
     // Same 1 ns default delay as QueueEvent: the raise is delivered on the next ProcessEvents.
+    if (OnCpuThread()) {
+        cpuLane_.push_back({std::chrono::nanoseconds(1), ivg, {}});
+        return;
+    }
+    std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
     eventQueue.push_back({std::chrono::nanoseconds(1), ivg, {}});
     eventCount_.store(eventQueue.size(), std::memory_order_release);
 }
 
 void BlackFinCpu::ProcessEvents() {
-    constexpr std::chrono::nanoseconds instructionTime(1); // Approximate instruction execution time
-    // Fast path: nearly every block runs with an empty queue. Skip the lock and the copy.
-    if (eventCount_.load(std::memory_order_acquire) == 0) {
-        elapsedTime += instructionTime;
-        return;
+    if (!cpuThreadKnown_.load(std::memory_order_relaxed)) {
+        cpuThreadId_ = std::this_thread::get_id();
+        cpuThreadKnown_.store(true, std::memory_order_release);
     }
-    std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
-    // Run the events that were due when this call started, in order. Events they queue are not run in
-    // this pass and, if due, are dropped by the removal below (the behavior of the original copy-based
-    // loop, kept as is). Due events are moved out first, so an event that queues another cannot
-    // invalidate the one running.
-    dueEvents_.clear();
-    for (auto& e : eventQueue)
-        if (e.delay <= std::chrono::nanoseconds(0)) dueEvents_.push_back(std::move(e));
-    for (auto& e : dueEvents_) {
+    if (!cpuLane_.empty()) ProcessLane(cpuLane_);
+    // Fast path: nearly every block runs with no events from other threads. Skip the lock.
+    if (eventCount_.load(std::memory_order_acquire) != 0) {
+        std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
+        ProcessLane(eventQueue);
+        eventCount_.store(eventQueue.size(), std::memory_order_release);
+    }
+    elapsedTime += std::chrono::nanoseconds(1);
+}
+
+// Runs the events of one lane that were due when the call started, in order, then removes the due ones
+// and counts the others down by 1 ns. Events queued while running are not run in this pass and, if
+// due, are dropped by the removal (the behavior of the original copy-based loop, kept as is). Due events
+// are moved out first, so an event that queues another cannot invalidate the one running.
+void BlackFinCpu::ProcessLane(std::vector<Event>& lane) {
+    constexpr std::chrono::nanoseconds instructionTime(1); // Approximate instruction execution time
+    std::vector<Event> due;
+    due.swap(dueEvents_);
+    due.clear();
+    for (auto& e : lane)
+        if (e.delay <= std::chrono::nanoseconds(0)) due.push_back(std::move(e));
+    for (auto& e : due) {
         if (e.raiseIvg >= 0) cec_raise(cpuState_.get(), e.raiseIvg);
         else e.fn();
 #ifdef ENABLE_PROFILING
         ++eventsDelivered_;
 #endif
     }
-    // Remove processed events
-    auto it = eventQueue.begin();
-    while (it != eventQueue.end()) {
-        if (it->delay <= std::chrono::nanoseconds(0)) {
-            it = eventQueue.erase(it);
-        } else {
-            it->delay -= instructionTime;
-            ++it;
-        }
+    size_t w = 0;
+    for (size_t r = 0; r < lane.size(); ++r) {
+        if (lane[r].delay <= std::chrono::nanoseconds(0)) continue;
+        lane[r].delay -= instructionTime;
+        if (w != r) lane[w] = std::move(lane[r]);
+        ++w;
     }
-    eventCount_.store(eventQueue.size(), std::memory_order_release);
-    elapsedTime += instructionTime;
+    lane.resize(w);
+    due.swap(dueEvents_);
 }
 
 void BlackFinCpu::AttachDisplay(const std::shared_ptr<Display>& display) {

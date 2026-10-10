@@ -96,12 +96,9 @@ void SIC::ForwardInterrupts() {
 
         if (!ipend) continue;
 
-        for (int pin = 0; pin < 32; pin++) {
-            u32 bit = 1 << pin;
-
-            // This bit isn't pending, check next one
-            if (!(ipend & bit)) continue;
-
+        // Pending pins in ascending order (same order as a 0..31 scan).
+        for (u32 rest = ipend; rest; rest &= rest - 1) {
+            const int pin = __builtin_ctz(rest);
             forwardInterrupt(GetIVG(i * 32 + pin), 1);
         }
     }
