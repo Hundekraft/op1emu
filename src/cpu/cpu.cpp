@@ -485,6 +485,12 @@ HaltReason BlackFinCpu::Run() {
         if (cpuState_->pc == 0xFFA00000) {
             ApplyOverlay();
             core_->invalidate();
+            PrefetchPack();
+            prefetchAgainNs_ = time_.Nanoseconds() + 10'000'000'000ull;   // and once more when init is done
+        }
+        if (prefetchAgainNs_ && time_.Nanoseconds() >= prefetchAgainNs_) {
+            prefetchAgainNs_ = 0;
+            PrefetchPack();
         }
         // Execute one basic block — bcore updates cpuState_->pc internally.
         // Hardware loops, PC advance, and hwloop counters are all handled by bcore.
@@ -694,6 +700,17 @@ void BlackFinCpu::VerifyAgainst(u32 pc, const CpuState& in, const std::map<uint3
     if (seen.insert(pc).second) LogInfo("VERIFY mismatch block %#x (%u insns):%s", pc, j.packets, diff.c_str());
 }
 
+// Background compile: queue every cached block whose code is in memory as a low-priority load, so screens
+// and engines run compiled code the first time (pack loads otherwise happen on first use, thousands at once
+// when a new screen comes up). OP1EMU_PREFETCH=0 turns it off.
+void BlackFinCpu::PrefetchPack() {
+    if (const char* e = getenv("OP1EMU_PREFETCH"); e && e[0] == '0') return;
+    const auto t0 = std::chrono::steady_clock::now();
+    const size_t n = core_->prefetch_pack();
+    if (n) LogInfo("JIT: preloading %zu cached blocks in the background (queued in %.1f ms)", n,
+                   std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+}
+
 void BlackFinCpu::UpdateAsyncCompile() {
     // Direct memory for the interpreter: SDRAM, L1 data A/B (+cache), L1 code, scratchpad.
     {
@@ -729,8 +746,13 @@ void BlackFinCpu::Pace() {
     }
     const uint64_t guest = time_.Nanoseconds();
     const uint64_t hostElapsed = host - paceStartNs_;
-    if (guest > hostElapsed + 2'000'000) {
-        const uint64_t ahead = guest - hostElapsed - 1'000'000;
+    // OP1EMU_LEAD_MS (default 70): let the guest run up to this far ahead of the host clock when it has
+    // headroom, so a burst of guest work slower than real time (engine switches, a first visit to a screen)
+    // eats the lead instead of falling behind. The audio it renders early queues in the host ring, so the
+    // GUI's audio prefill is smaller by the same amount (see gui/audio_output_miniaudio.cpp).
+    static const uint64_t leadNs = (uint64_t)(getenv("OP1EMU_LEAD_MS") ? strtoul(getenv("OP1EMU_LEAD_MS"), nullptr, 10) : 70) * 1'000'000ull;
+    if (guest > hostElapsed + leadNs + 2'000'000) {
+        const uint64_t ahead = guest - hostElapsed - leadNs - 1'000'000;
         std::this_thread::sleep_for(std::chrono::nanoseconds(ahead));
         statsSleptNs_ += ahead;
     } else if (hostElapsed > guest) {

@@ -9,11 +9,13 @@
 
 static constexpr ma_uint32 SAMPLE_RATE = SPORT::kSampleRateHz;  // the guest's rate; miniaudio converts if needed
 static constexpr ma_uint32 CHANNELS = 2;
-// Playback starts (and restarts after an underrun) once the ring holds the prefill: the latency that absorbs
-// guest stalls (JIT compiles, host hiccups). OP1EMU_AUDIO_MS sets it (default 100 ms); the ring holds 3x that.
+// Playback starts (and restarts after an underrun) once the ring holds the prefill. In --realtime the guest
+// also runs up to OP1EMU_LEAD_MS (default 70) ahead of the host clock, and that audio queues on top, so the
+// total buffer (and key-to-sound latency) is about prefill + lead = 100 ms by default. OP1EMU_AUDIO_MS sets
+// the prefill (default 30 ms); the ring holds 3x that plus 250 ms of room for the lead.
 static ma_uint32 PrefillFrames() {
     static const ma_uint32 frames = [] {
-        long ms = 100;
+        long ms = 30;
         if (const char* e = std::getenv("OP1EMU_AUDIO_MS")) ms = std::clamp(std::strtol(e, nullptr, 10), 10L, 1000L);
         return (ma_uint32)(SAMPLE_RATE * ms / 1000);
     }();
@@ -27,7 +29,7 @@ MiniaudioOutput::MiniaudioOutput()
     auto* dev = new ma_device;
 
     // Initialize the ring buffer (float32, stereo)
-    ma_result result = ma_pcm_rb_init(ma_format_f32, CHANNELS, PrefillFrames() * 3, nullptr, nullptr, rb);
+    ma_result result = ma_pcm_rb_init(ma_format_f32, CHANNELS, PrefillFrames() * 3 + SAMPLE_RATE / 4, nullptr, nullptr, rb);
     if (result != MA_SUCCESS) {
         LogError("Failed to initialize audio ring buffer: %d", result);
         delete rb;

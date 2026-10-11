@@ -21,7 +21,7 @@ static int glue_user_mode;
 static void bail (void)
 {
   if (bailing)
-    longjmp (bail_env, 1);
+    _longjmp (bail_env, 1);
 }
 
 /* ---- Simulator callbacks ---- */
@@ -176,7 +176,7 @@ interp_glue_run (struct interp_glue_regs *regs, const struct interp_glue_mem *me
         break;
       saved = sim_st;
       mmr_touched = 0;
-      if (setjmp (bail_env))
+      if (_setjmp (bail_env))
         {
           bailing = 0;
           sim_st = saved;   /* undo the partly executed instruction */
