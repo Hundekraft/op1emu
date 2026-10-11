@@ -148,6 +148,7 @@ private:
 }  // namespace
 
 BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
+    pcProf_ = getenv("OP1EMU_PC_PROF") != nullptr;
     if (const char* b = getenv("OP1EMU_BATCH")) batchCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
     if (const char* b = getenv("OP1EMU_BATCH_AFTER")) batchAfterCycles_ = strtoull(b, nullptr, 10);
     panicLog_ = getenv("OP1_PANIC_LOG") != nullptr;
@@ -398,6 +399,16 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
 }
 
 BlackFinCpu::~BlackFinCpu() {
+    if (!pcProf_ || pcProfNs_.empty()) return;
+    std::vector<std::pair<uint32_t, std::pair<uint64_t, uint64_t>>> v(pcProfNs_.begin(), pcProfNs_.end());
+    std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+    uint64_t total = 0;
+    for (const auto& e : v) total += e.second.first;
+    fprintf(stderr, "pc profile: %.1f ms in block runs\n", total / 1e6);
+    for (size_t i = 0; i < v.size() && i < 60; ++i)
+        fprintf(stderr, "  %#010x %8.2f ms %5.1f%% %10llu packets %6.1f ns/packet\n", v[i].first, v[i].second.first / 1e6,
+                100.0 * v[i].second.first / total, (unsigned long long)v[i].second.second,
+                v[i].second.second ? (double)v[i].second.first / v[i].second.second : 0.0);
 }
 
 void BlackFinCpu::ProcessInterrupt(int pin, int level) {
@@ -501,9 +512,14 @@ HaltReason BlackFinCpu::Run() {
             verifySteps = Interpreter::Run(&verifyState, verifyMem.get(), cec_is_user_mode(), 256);
             core_->set_chain_budget(0);
         }
-        const uint64_t lagT0 = lagLogOn_ ? HostNowNs() : 0;
+        const uint64_t lagT0 = (lagLogOn_ || pcProf_) ? HostNowNs() : 0;
         const u32 lagPc = cpuState_->pc;
         const bool ranJit = !interpreted && core_->run(cpuState_->pc);
+        if (pcProf_) {   // OP1EMU_PC_PROF: host time and packets per block-run entry pc, printed at exit
+            auto& e = pcProfNs_[lagPc];
+            e.first += HostNowNs() - lagT0;
+            e.second += cpuState_->packets;
+        }
         if (lagLogOn_) {
             const uint64_t d = HostNowNs() - lagT0;
             lagRunSumNs_ += d;

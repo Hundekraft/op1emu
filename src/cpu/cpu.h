@@ -96,7 +96,8 @@ private:
     uint64_t interpSteps_ = 0, interpBails_ = 0, statsInterpSteps_ = 0, statsInterpBails_ = 0;
     void Pace();
     uint64_t lagPrevHostNs_ = 0, lagPrevGuestNs_ = 0, lagPrevBatches_ = 0, lagPrevMmr_ = 0;   // OP1EMU_LAG_LOG
-    bool lagLogOn_ = false; uint64_t lagPrevInterpNs_ = 0, lagPrevInterpSteps_ = 0; uint64_t lagRunMaxNs_ = 0, lagAfterMaxNs_ = 0, lagRunSumNs_ = 0; uint32_t lagRunMaxPc_ = 0;
+    bool lagLogOn_ = false; bool pcProf_ = false; std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> pcProfNs_;   // OP1EMU_PC_PROF
+    uint64_t lagPrevInterpNs_ = 0, lagPrevInterpSteps_ = 0; uint64_t lagRunMaxNs_ = 0, lagAfterMaxNs_ = 0, lagRunSumNs_ = 0; uint32_t lagRunMaxPc_ = 0;
     uint64_t paceStartNs_ = 0, paceCalls_ = 0, statsNextNs_ = 0, statsSleptNs_ = 0, statsMaxLagNs_ = 0;
     u32 breakPc_ = 0;
     std::set<u32> breakPcs_;

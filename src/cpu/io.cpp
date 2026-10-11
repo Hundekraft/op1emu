@@ -19,9 +19,10 @@ void MemoryDevice::BindFastMem(const std::shared_ptr<FastMem>& mem)
     fastmem = mem;
     if (fastmem && fastmem->Enabled()) {
         memAddress = (u8*)fastmem->Map(baseAddress, size);
-    } else if (size >= (16u << 20)) {
-        // Same address every run (when free): bcore inlines SDRAM loads/stores as fast_base + addr, so a
-        // stable fast_base keeps the generated code, and its persistent cache key, the same across runs.
+    } else {
+        // Same address every run (when free): bcore inlines SDRAM, L1 data and scratchpad loads/stores at
+        // fixed host addresses, so stable addresses keep the generated code, and its persistent cache key,
+        // the same across runs.
         void* hint = reinterpret_cast<void*>(0x6000000000ull + baseAddress);
         void* p = mmap(hint, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (p != MAP_FAILED) {
@@ -31,9 +32,6 @@ void MemoryDevice::BindFastMem(const std::shared_ptr<FastMem>& mem)
             memory.resize(this->size);
             memAddress = memory.data();
         }
-    } else {
-        memory.resize(this->size);
-        memAddress = memory.data();
     }
     memset(memAddress, 0, size);
 }

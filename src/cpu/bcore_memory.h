@@ -29,6 +29,8 @@ public:
     // Guest addresses below rawmem_limit() are plain SDRAM at fast_base() + addr; bcore inlines those
     // loads/stores and calls read*/write* only for the rest (MMRs, L1, boot ROM). 0 = always call.
     uint32_t rawmem_limit() const override { return rawLimit_; }
+    // L1 data banks and the scratchpad, when plain memory without hooks (see Emulator::PlainRange).
+    int fast_ranges(FastRange* out, int max) const override;
     // True once after the guest accessed an MMR (>= 0xFFC00000) since the last call.
     bool TakeMmrTouched() { const bool t = mmrTouched_; mmrTouched_ = false; return t; }
     bool MmrTouched() const { return mmrTouched_; }
@@ -43,6 +45,8 @@ private:
     Emulator& emulator_;
     mutable bool mmrTouched_ = false;
 
+    FastRange ranges_[8];
+    int nRanges_ = 0;
     uintptr_t rawBase_ = 0;
     uint32_t rawLimit_ = 0;
 #ifdef ENABLE_PROFILING

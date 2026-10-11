@@ -26,6 +26,20 @@ EmulatorMemory::EmulatorMemory(Emulator& emulator)
             rawLimit_ = size;
         }
     }
+    // L1 data A/B (SRAM and cache-as-SRAM halves) and the scratchpad. Not L1 code: writes there must
+    // keep going through the emulator.
+    for (u32 a : {0xFF800000u, 0xFF804000u, 0xFF900000u, 0xFF904000u, 0xFFB00000u}) {
+        u8* h = nullptr; u32 base = 0, sz = 0;
+        if (nRanges_ < 8 && emulator_.PlainRange(a, &h, &base, &sz) && base == a)
+            ranges_[nRanges_++] = FastRange{base, sz, reinterpret_cast<uintptr_t>(h)};
+    }
+    if (getenv("OP1EMU_NO_L1_INLINE")) nRanges_ = 0;
+}
+
+int EmulatorMemory::fast_ranges(FastRange* out, int max) const {
+    int n = 0;
+    for (; n < nRanges_ && n < max; ++n) out[n] = ranges_[n];
+    return n;
 }
 
 uint32_t EmulatorMemory::base() const {
