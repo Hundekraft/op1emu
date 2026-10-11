@@ -1,8 +1,17 @@
+#include <chrono>
 #include "MT29F4G08.h"
 #include "cpu/cpu.h"
 #include "utils/log.h"
 #include <cstring>
 #include <algorithm>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <pthread.h>
+#include <pthread/qos.h>
+#endif
 
 // MT29F4G08 specifications
 static constexpr u32 PAGE_SIZE = 2048;
@@ -73,6 +82,7 @@ MT29F4G08::MT29F4G08(BlackFinCpu& cpu, const std::string& storagePath, bool snap
         if (!storageFile.is_open()) {
             LogError("MT29F4G08: Failed to open snapshot storage file: %s", storagePath.c_str());
         }
+        MapStorage();
         return;
     }
 
@@ -95,9 +105,38 @@ MT29F4G08::MT29F4G08(BlackFinCpu& cpu, const std::string& storagePath, bool snap
     if (!storageFile.is_open()) {
         LogError("MT29F4G08: Failed to open storage file: %s", storagePath.c_str());
     }
+    MapStorage();
+}
+
+void MT29F4G08::MapStorage() {
+    if (!storageFile.is_open()) return;
+    const int fd = open(storagePath.c_str(), O_RDONLY);
+    if (fd < 0) return;
+    struct stat st;
+    if (fstat(fd, &st) == 0 && st.st_size > 0) {
+        void* m = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+        if (m != MAP_FAILED) {
+            map_ = static_cast<const u8*>(m);
+            mapSize_ = (size_t)st.st_size;
+            madvise(m, mapSize_, MADV_WILLNEED);
+        }
+    }
+    close(fd);
+    if (!map_) return;
+    prefetch_ = std::thread([this] {
+#ifdef __APPLE__
+        pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
+        volatile u8 sink = 0;
+        for (size_t off = 0; off < mapSize_ && !stopPrefetch_.load(std::memory_order_relaxed); off += 16384)
+            sink = sink + map_[off];
+    });
 }
 
 MT29F4G08::~MT29F4G08() {
+    stopPrefetch_.store(true);
+    if (prefetch_.joinable()) prefetch_.join();
+    if (map_) munmap(const_cast<u8*>(map_), mapSize_);
     if (storageFile.is_open()) {
         storageFile.close();
     }
@@ -289,6 +328,16 @@ void MT29F4G08::LoadPage(u32 pageNumber) {
         }
     }
 
+    if (map_) {
+        const u64 pageOffset = static_cast<u64>(pageNumber) * PAGE_SIZE;
+        const u64 oobOffset = OOB_AREA_OFFSET + static_cast<u64>(pageNumber) * OOB_SIZE;
+        if (pageOffset + PAGE_SIZE <= mapSize_) memcpy(pageBuffer.data(), map_ + pageOffset, PAGE_SIZE);
+        else std::fill(pageBuffer.begin(), pageBuffer.begin() + PAGE_SIZE, ERASED_VALUE);
+        if (oobOffset + OOB_SIZE <= mapSize_) memcpy(pageBuffer.data() + PAGE_SIZE, map_ + oobOffset, OOB_SIZE);
+        else std::fill(pageBuffer.begin() + PAGE_SIZE, pageBuffer.end(), ERASED_VALUE);
+        return;
+    }
+
     if (!storageFile.is_open()) {
         std::fill(pageBuffer.begin(), pageBuffer.end(), ERASED_VALUE);
         return;
@@ -351,11 +400,26 @@ void MT29F4G08::SavePage(u32 pageNumber) {
 }
 
 void MT29F4G08::ExecuteRead() {
+    static const bool timeReads = getenv("OP1EMU_NAND_TIME") != nullptr;   // debug: page read cost
+    static uint64_t reads = 0, busyNs = 0, loadNs = 0, loadMaxNs = 0, slow = 0;
+    const auto t0 = std::chrono::steady_clock::now();
     SetBusy();
+    const auto t1 = std::chrono::steady_clock::now();
     u32 pageNumber = GetCurrentPage();
     u32 column = GetColumnAddress();
 
     LoadPage(pageNumber);
+    if (timeReads) {
+        const auto t2 = std::chrono::steady_clock::now();
+        busyNs += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        const uint64_t l = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+        loadNs += l; loadMaxNs = std::max(loadMaxNs, l); slow += l > 200'000;
+        if (++reads % 200 == 0) {
+            LogInfo("NAND: %llu page reads, avg SetBusy %.1f us, LoadPage %.1f us (max %.0f us, %llu over 200 us)",
+                    (unsigned long long)reads, busyNs / 200 / 1e3, loadNs / 200 / 1e3, loadMaxNs / 1e3, (unsigned long long)slow);
+            busyNs = loadNs = loadMaxNs = slow = 0;
+        }
+    }
     dataOffset = column;
 
     if (readCallback) {

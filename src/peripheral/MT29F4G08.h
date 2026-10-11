@@ -4,6 +4,8 @@
 #include <vector>
 #include <fstream>
 #include <unordered_map>
+#include <atomic>
+#include <thread>
 
 class BlackFinCpu;
 
@@ -52,6 +54,14 @@ protected:
     std::fstream storageFile;
     bool snapshot_ = false;
     std::unordered_map<u32, std::vector<u8>> dirtyPages_;
+    // Read-only map of the backing file: page reads are a memcpy instead of seek+read on the stream (a page
+    // read that missed the OS cache took up to ~2.5 ms on the CPU thread and lagged --realtime). Writes still
+    // go through storageFile; the shared map sees them. A background thread touches the whole map once.
+    void MapStorage();
+    const u8* map_ = nullptr;
+    size_t mapSize_ = 0;
+    std::thread prefetch_;
+    std::atomic<bool> stopPrefetch_{false};
     std::vector<u8> pageBuffer;
     std::vector<u8> programBuffer;
 

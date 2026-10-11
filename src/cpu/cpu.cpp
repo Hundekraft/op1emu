@@ -422,6 +422,8 @@ static void SetBfinCycles(CpuState& cpu_state, u64 cycles) {
     cpu_state.cycles[2] = cpu_state.cycles[1];
 }
 
+static uint64_t HostNowNs();
+
 HaltReason BlackFinCpu::Run() {
     // Runs guest blocks back to back and does the between-block work (interrupts, device polling,
     // timers, events) once per batch of at least batchCycles_ guest cycles instead of after every
@@ -499,7 +501,15 @@ HaltReason BlackFinCpu::Run() {
             verifySteps = Interpreter::Run(&verifyState, verifyMem.get(), cec_is_user_mode(), 256);
             core_->set_chain_budget(0);
         }
-        if (!interpreted && !core_->run(cpuState_->pc)) {
+        const uint64_t lagT0 = lagLogOn_ ? HostNowNs() : 0;
+        const u32 lagPc = cpuState_->pc;
+        const bool ranJit = !interpreted && core_->run(cpuState_->pc);
+        if (lagLogOn_) {
+            const uint64_t d = HostNowNs() - lagT0;
+            lagRunSumNs_ += d;
+            if (d > lagRunMaxNs_) { lagRunMaxNs_ = d; lagRunMaxPc_ = lagPc; }
+        }
+        if (!interpreted && !ranJit) {
             // Async compile: the block is still compiling. Interpret one instruction meanwhile; what the
             // interpreter leaves to the JIT (CEC/MMU work, exceptions, IDLE) waits for the compile.
             // Straight-line code is interpreted up to the next jump (or loop back), so only real block
@@ -549,7 +559,11 @@ HaltReason BlackFinCpu::Run() {
         }
     }
     if (stats_) { ++batches_; if (idle) ++endIdle_; if (batch == 1) ++batchOne_; }
-    AfterBlock(batchStart);
+    {
+        const uint64_t lagT0 = lagLogOn_ ? HostNowNs() : 0;
+        AfterBlock(batchStart);
+        if (lagLogOn_) lagAfterMaxNs_ = std::max(lagAfterMaxNs_, HostNowNs() - lagT0);
+    }
     if (idle) IdleUntilInterrupt();
     if (realtime_ && (++paceCalls_ & 255) == 0) Pace();
     return HaltReason::Break;
@@ -705,9 +719,21 @@ void BlackFinCpu::Pace() {
         statsSleptNs_ += ahead;
     } else if (hostElapsed > guest) {
         statsMaxLagNs_ = std::max(statsMaxLagNs_, hostElapsed - guest);
+        // OP1EMU_LAG_LOG=MS: log each lag over MS ms with the host and guest time since the previous Pace().
+        static const long lagLog = getenv("OP1EMU_LAG_LOG") ? strtol(getenv("OP1EMU_LAG_LOG"), nullptr, 10) : -1;
+        if (lagLog >= 0 && hostElapsed - guest > (uint64_t)lagLog * 1'000'000 && host - lagPrevHostNs_ > 1'000'000)
+            LogInfo("lag %.1f ms: since last pace host %.2f ms, guest %.2f ms, pc %#x ivg %d, mmr ends %llu; block runs %.2f ms "
+                    "(slowest %.2f ms at %#x), slowest AfterBlock %.2f ms, interpreted %llu in %.2f ms",
+                    (hostElapsed - guest) / 1e6, (host - lagPrevHostNs_) / 1e6, (guest - lagPrevGuestNs_) / 1e6, cpuState_->pc,
+                    cec_current_ivg(), (unsigned long long)(endMmr_ - lagPrevMmr_), lagRunSumNs_ / 1e6, lagRunMaxNs_ / 1e6,
+                    lagRunMaxPc_, lagAfterMaxNs_ / 1e6, (unsigned long long)(interpSteps_ - lagPrevInterpSteps_),
+                    (interpNs_ - lagPrevInterpNs_) / 1e6);
         // Too far behind (boot, a host stall): drop the backlog instead of running fast to catch up.
         if (hostElapsed - guest > 50'000'000) paceStartNs_ = host - guest;
     }
+    lagPrevHostNs_ = HostNowNs(); lagPrevGuestNs_ = guest; lagPrevBatches_ = batches_; lagPrevMmr_ = endMmr_;
+    lagPrevInterpNs_ = interpNs_; lagPrevInterpSteps_ = interpSteps_;
+    lagLogOn_ = getenv("OP1EMU_LAG_LOG") != nullptr; lagRunMaxNs_ = lagAfterMaxNs_ = lagRunSumNs_ = 0;
     if (stats_ && host >= statsNextNs_) {
         const double hostS = (host - statsLastHostNs_) / 1e9, guestS = (guest - statsLastGuestNs_) / 1e9;
         LogInfo("realtime: %.2fx real time over %.1f s, slept %.0f%%, max lag %.1f ms",
@@ -720,7 +746,7 @@ void BlackFinCpu::Pace() {
             LogInfo("interpreted %llu instructions in %.1f ms while compiling; %llu left to the JIT, waited %.1f ms (max %.1f)",
                     (unsigned long long)(interpSteps_ - statsInterpSteps_), interpNs_ / 1e6,
                     (unsigned long long)(interpBails_ - statsInterpBails_), syncWaitNs_ / 1e6, syncWaitMaxNs_ / 1e6);
-        interpNs_ = syncWaitNs_ = syncWaitMaxNs_ = 0;
+        interpNs_ = syncWaitNs_ = syncWaitMaxNs_ = 0; lagPrevInterpNs_ = 0;
         statsInterpSteps_ = interpSteps_; statsInterpBails_ = interpBails_;
         if (verifyHi_) LogInfo("verify: %llu blocks equal, %llu mismatches", (unsigned long long)verifyOk_, (unsigned long long)verifyBad_);
         LogInfo("now: pc %#x ivg %d ipend %#x ilat %#x imask %#x", cpuState_->pc, cec_current_ivg(), cec_ipend(), cec_ilat(),
