@@ -10,6 +10,7 @@
 #include "twi.h"
 #include "sic.h"
 #include "coretimer.h"
+#include "watchdog.h"
 #include "otp.h"
 #include "gptimer.h"
 #include "dma.h"
@@ -275,6 +276,9 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
         if (level) QueueRaise(ivg);
     });
     devices.emplace_back(coreTimer);
+    watchdog_ = std::make_shared<Watchdog>(0xFFC00200, time_);
+    watchdog_->SetResetCallback([this]() { resetRequested_.store(true, std::memory_order_release); });
+    devices.emplace_back(watchdog_);
 
     std::shared_ptr<TWI> twi = std::make_shared<TWI>(0xFFC01400);
     devices.push_back(twi);
@@ -451,13 +455,14 @@ HaltReason BlackFinCpu::Run() {
     const bool armed = time_.Cycles() >= batchAfterCycles_;
     const uint64_t batch = (armed && !laneUrgent_) ? batchCycles_ : 1;
     for (uint64_t executed = 0; executed < batch && !idle;) {
-        if (stopPc_ && cpuState_->pc == stopPc_) break;
+        if ((stopPc_ && cpuState_->pc == stopPc_) || resetRequested_.load(std::memory_order_relaxed)) break;
         // Guest time at the start of this block: host time, or in deterministic
         // mode the packets every earlier block executed (see TimeSource).
         const uint64_t cyclesElapsed = time_.Cycles();
         if (executed == 0) batchStart = cyclesElapsed;
         SetBfinCycles(*cpuState_, cyclesElapsed);
         coreTimer->UpdateCycles(cyclesElapsed);
+        watchdog_->UpdateCycles(cyclesElapsed);
 
 #ifdef ENABLE_PROFILING
         const uint32_t blockPc = cpuState_->pc;
@@ -610,6 +615,7 @@ void BlackFinCpu::IdleUntilInterrupt() {
         const uint64_t cyclesElapsed = time_.Cycles();
         SetBfinCycles(*cpuState_, cyclesElapsed);
         coreTimer->UpdateCycles(cyclesElapsed);
+        watchdog_->UpdateCycles(cyclesElapsed);
         AfterBlock(cyclesElapsed);
     }
 }

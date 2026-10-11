@@ -68,7 +68,7 @@ static constexpr u8 ID_ONFI[] = {
 };
 
 MT29F4G08::MT29F4G08(BlackFinCpu& cpu, const std::string& storagePath, bool snapshot)
-    : cpu(cpu)
+    : cpu(&cpu)
     , storagePath(storagePath)
     , snapshot_(snapshot)
     , pageBuffer(PAGE_TOTAL_SIZE, ERASED_VALUE)
@@ -223,7 +223,7 @@ void MT29F4G08::SendAddress(u8 address) {
 
 void MT29F4G08::SetBusy() {
     isBusy = true;
-    cpu.QueueEvent([this]() {
+    cpu->QueueEvent([this]() {
         isBusy = false;
     }, std::chrono::nanoseconds(1)); // Simulate 1ns operation time
 }

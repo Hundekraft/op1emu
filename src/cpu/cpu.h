@@ -28,6 +28,7 @@ enum RegIndex {
 
 class SIC;
 class CoreTimer;
+class Watchdog;
 class GPIO;
 class PPI;
 class Display;
@@ -125,6 +126,9 @@ public:
     // Run() returns as soon as the pc reaches this address (0 = off). The LDR loader's return address for
     // an init block: without it the stop depended on where a batch happened to end.
     void SetStopPc(u32 pc) { stopPc_ = pc; }
+    // True once the watchdog reset the system: Run() returns and the host rebuilds the machine (a real
+    // reset reloads everything from the boot ROM; the NAND keeps its contents).
+    bool ResetRequested() const { return resetRequested_.load(std::memory_order_acquire); }
 
     void QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay = std::chrono::nanoseconds(1));
 
@@ -158,6 +162,8 @@ protected:
 
     std::shared_ptr<SIC> sic;
     std::shared_ptr<CoreTimer> coreTimer;
+    std::shared_ptr<Watchdog> watchdog_;
+    std::atomic<bool> resetRequested_{false};
     std::shared_ptr<GPIO> portG;
     std::shared_ptr<PPI> ppi;
     std::shared_ptr<OLED> oled;

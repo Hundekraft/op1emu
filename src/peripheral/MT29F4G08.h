@@ -21,6 +21,8 @@ public:
     // tape recordings) are discarded on exit.
     MT29F4G08(BlackFinCpu& cpu, const std::string& storagePath, bool snapshot = false);
     ~MT29F4G08();
+    // After a system reset the host builds a new BlackFinCpu; the NAND (and a snapshot's overlay) stays.
+    void Rebind(BlackFinCpu& c) { cpu = &c; isBusy = false; }
 
     void SendCommand(u8 command) override;
     void SendAddress(u8 address) override;
@@ -49,7 +51,7 @@ protected:
     u32 GetColumnAddress() const;
     u32 GetBlockAddress() const;
 
-    BlackFinCpu& cpu;
+    BlackFinCpu* cpu;
     std::string storagePath;
     std::fstream storageFile;
     bool snapshot_ = false;

@@ -21,6 +21,9 @@ class USBIPServer {
 public:
     USBIPServer(uvw::loop& loop, USBDevice& device);
     void Start();
+    // A system reset replaces the USB device (nullptr while the machine is rebuilt): the next requests go to
+    // the new one, like a re-plug.
+    void Rebind(USBDevice* d);
 
 private:
     void OnClientDataEvent(const uvw::data_event& event, uvw::tcp_handle& client);
@@ -36,5 +39,6 @@ private:
     uvw::loop& loop;
     std::shared_ptr<uvw::tcp_handle> server;
 
-    USBDevice& device;
+    USBDevice* device;
+    std::recursive_mutex deviceMutex;   // held while a request is in the device and by Rebind
 };

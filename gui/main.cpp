@@ -57,6 +57,7 @@ void LdrExecutionThread(BlackFinCpu& cpu, const LDRParser& parser) {
         while (!cpuShouldStop.load()) {
             cpu.Run();
             if (cpu.Failed()) cpuShouldStop.store(true);
+            if (cpu.ResetRequested()) { LogInfo("CPU thread exiting for a system reset"); return; }
 
             if (cpu.PC() == 0x8000000) {
                 LogInfo("Finished executing DXE");
@@ -84,6 +85,7 @@ void BootExcutionThread(BlackFinCpu& cpu) {
     while (!cpuShouldStop.load()) {
         cpu.Run();
         if (cpu.Failed()) cpuShouldStop.store(true);
+        if (cpu.ResetRequested()) { LogInfo("CPU thread exiting for a system reset"); return; }
     }
     cpuShouldStop.store(true);
     LogInfo("CPU thread exiting");
@@ -230,11 +232,18 @@ static int RunEmulator(int argc, char* argv[]) {
     std::signal(SIGTERM, StopSigHandler);
     std::signal(SIGINT, StopSigHandler);
 
-    // Create BlackFin CPU
-    BlackFinCpu cpu(deterministic);
-    if (rtcEpoch) cpu.SetRtcEpoch(std::chrono::system_clock::time_point(std::chrono::seconds(*rtcEpoch)));
-    else if (realtime) cpu.SetRtcEpoch(std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now()));
-    cpu.SetRealtime(realtime);
+    // Create BlackFin CPU. A watchdog reset rebuilds it (the machine starts over from the boot ROM); the
+    // window, audio output, NAND and USB/IP server stay.
+    std::unique_ptr<BlackFinCpu> cpuOwner;
+    BlackFinCpu* cpu = nullptr;
+    auto makeCpu = [&]() {
+        cpuOwner = std::make_unique<BlackFinCpu>(deterministic);
+        cpu = cpuOwner.get();
+        if (rtcEpoch) cpu->SetRtcEpoch(std::chrono::system_clock::time_point(std::chrono::seconds(*rtcEpoch)));
+        else if (realtime) cpu->SetRtcEpoch(std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now()));
+        cpu->SetRealtime(realtime);
+    };
+    makeCpu();
 #ifdef ENABLE_PROFILING
     std::unique_ptr<Profiler> profiler;
     if (anyProfiling) {
@@ -247,19 +256,24 @@ static int RunEmulator(int argc, char* argv[]) {
         profile.perfWindow = perfWindow;
         profile.until = profileUntil;
         profile.jitdump = perfJitdump;
-        profiler = std::make_unique<Profiler>(profile, cpu, [] { cpuShouldStop.store(true); });
-        cpu.SetProfiler(profiler.get());
+        profiler = std::make_unique<Profiler>(profile, *cpu, [] { cpuShouldStop.store(true); });
+        cpu->SetProfiler(profiler.get());
         // The verified-frame mark sees exactly the pixels the frontend gets.
         if (profiler->WantsFrames()) display = std::make_shared<FrameTap>(display, *profiler);
     }
 #endif
-    cpu.AttachDisplay(display);
-    cpu.AttachKeyboard(keyboard);
     // SPORT still drains DMA and advances its sample accounting without a
     // host sink. Avoid opening ALSA/PulseAudio devices on headless hosts.
-    if (!headless) cpu.AttachAudioOutput(std::make_shared<MiniaudioOutput>());
-    cpu.SetJitCacheDir(jitCacheDir);
-    cpu.SetBootMode(0x0D); // Set BMODE to 0b1101, boot from NAND flash with port H
+    std::shared_ptr<MiniaudioOutput> audioOutput;
+    if (!headless) audioOutput = std::make_shared<MiniaudioOutput>();
+    auto attachFrontends = [&]() {
+        cpu->AttachDisplay(display);
+        cpu->AttachKeyboard(keyboard);
+        if (audioOutput) cpu->AttachAudioOutput(audioOutput);
+        cpu->SetJitCacheDir(jitCacheDir);
+        cpu->SetBootMode(0x0D); // Set BMODE to 0b1101, boot from NAND flash with port H
+    };
+    attachFrontends();
 
     auto loop = uvw::loop::get_default();
     std::thread uvloop([loop]() {
@@ -271,7 +285,7 @@ static int RunEmulator(int argc, char* argv[]) {
     // std::thread destroyed at return would call std::terminate, masking the
     // exit code of a clean quit/SIGTERM shutdown.
     uvloop.detach();
-    USBIPServer usbipd(*loop, cpu.GetUSB());
+    USBIPServer usbipd(*loop, cpu->GetUSB());
     usbipd.Start();
 
     // Load LDR file
@@ -282,10 +296,10 @@ static int RunEmulator(int argc, char* argv[]) {
     }
 
     // Load NAND Flash underlying storage
-    auto nandFlash = std::make_shared<MT29F4G08>(cpu, positional[0], nandSnapshot);
+    auto nandFlash = std::make_shared<MT29F4G08>(*cpu, positional[0], nandSnapshot);
     if (nandSnapshot)
         LogInfo("NAND flash image opened read-only (snapshot mode; guest writes will be discarded)");
-    cpu.AttachNandFlash(nandFlash);
+    cpu->AttachNandFlash(nandFlash);
 
     uint64_t sensorVersion = UINT64_MAX; // forces the first headless push
     bool randomAccelSent = false;
@@ -302,18 +316,18 @@ static int RunEmulator(int argc, char* argv[]) {
             int16_t ax = static_cast<int16_t>((std::rand() % (540 - 50 + 1)) + 50); // ax in [50, 540]
             int16_t ay = static_cast<int16_t>((std::rand() % (-50 - (-540) + 1)) + (-540)); // ay in [-540, -50]
             int16_t az = static_cast<int16_t>((std::rand() % (874 - 75 + 1)) + 75); // az in [75, 874]
-            cpu.SetAcceleration(ax, ay, az); // Placeholder for random accelerometer data
+            cpu->SetAcceleration(ax, ay, az); // Placeholder for random accelerometer data
         }
         if (headless) {
             // Script-set sensors are pushed once per change; the CPU keeps the value.
             if (sensorsChanged) {
                 const auto& sensors = console->GetSensors();
-                if (sensors.accelFixed) cpu.SetAcceleration(sensors.ax, sensors.ay, sensors.az);
-                cpu.SetPotentiometerValue(0xFF - sensors.volume);
+                if (sensors.accelFixed) cpu->SetAcceleration(sensors.ax, sensors.ay, sensors.az);
+                cpu->SetPotentiometerValue(0xFF - sensors.volume);
                 sensorVersion = console->SensorVersion();
             }
         } else {
-            cpu.SetPotentiometerValue(0xFF - window->GetVolumeValue()); // Update potentiometer (volume) value
+            cpu->SetPotentiometerValue(0xFF - window->GetVolumeValue()); // Update potentiometer (volume) value
         }
     };
     // With --deterministic, a script's leading commands (up to its first wait)
@@ -328,10 +342,10 @@ static int RunEmulator(int argc, char* argv[]) {
     // Start CPU execution thread
     std::thread cpuThread;
     if (positional.size() > 1) {
-        cpuThread = std::thread(LdrExecutionThread, std::ref(cpu), std::ref(parser));
+        cpuThread = std::thread(LdrExecutionThread, std::ref(*cpu), std::ref(parser));
     } else {
         // If no LDR file is provided, just run the CPU without loading any code
-        cpuThread = std::thread(BootExcutionThread, std::ref(cpu));
+        cpuThread = std::thread(BootExcutionThread, std::ref(*cpu));
     }
 
     // Main thread handles GLFW display or headless input. cpuShouldStop is in
@@ -339,6 +353,23 @@ static int RunEmulator(int argc, char* argv[]) {
     int result = 0;
     try {
         while (!cpuShouldStop.load() && !(headless ? console->ShouldClose() : window->ShouldClose())) {
+            if (cpu->ResetRequested()) {
+                // Watchdog reset: drop the machine (its memory sits at fixed host addresses the JIT cache
+                // relies on, so the old one goes first) and boot a new one from the boot ROM.
+                cpuThread.join();
+                usbipd.Rebind(nullptr);
+                cpu->LogJitCacheStats();
+                cpuOwner.reset();
+                cpu = nullptr;
+                makeCpu();
+                attachFrontends();
+                nandFlash->Rebind(*cpu);
+                cpu->AttachNandFlash(nandFlash);
+                usbipd.Rebind(&cpu->GetUSB());
+                sensorVersion = UINT64_MAX;
+                cpuThread = std::thread(BootExcutionThread, std::ref(*cpu));
+                LogInfo("System reset: booting again");
+            }
             if (headless) console->PollEvents();
             else window->PollEvents();
             pushSensors();
@@ -355,11 +386,11 @@ static int RunEmulator(int argc, char* argv[]) {
     LogInfo("Stopping CPU thread...");
     cpuShouldStop.store(true);
     cpuThread.join();
-    cpu.LogJitCacheStats();
+    cpu->LogJitCacheStats();
     // Debugging aid: OP1_DUMP_L1=path writes L1 instruction memory (decrypted code) at exit.
     if (const char* dump = std::getenv("OP1_DUMP_L1")) {
         std::vector<u8> l1(0x14000);
-        cpu.GetEmulator().MemoryRead(0xFFA00000, l1.data(), (int)l1.size());
+        cpu->GetEmulator().MemoryRead(0xFFA00000, l1.data(), (int)l1.size());
         std::ofstream(dump, std::ios::binary).write(reinterpret_cast<const char*>(l1.data()), l1.size());
     }
     // OP1_DUMP_MEM=ADDR:LEN:PATH (hex ADDR/LEN) writes any guest range at exit.
@@ -369,11 +400,11 @@ static int RunEmulator(int argc, char* argv[]) {
         const u32 len = (end && *end == ':') ? (u32)strtoul(end + 1, &end, 16) : 0;
         if (len && end && *end == ':') {
             std::vector<u8> buf(len);
-            cpu.GetEmulator().MemoryRead(addr, buf.data(), (int)len);
+            cpu->GetEmulator().MemoryRead(addr, buf.data(), (int)len);
             std::ofstream(end + 1, std::ios::binary).write(reinterpret_cast<const char*>(buf.data()), len);
         }
     }
-    if (cpu.Failed()) {
+    if (cpu->Failed()) {
         LogError("Emulation stopped: CPU execution failed");
         result = 1;
     }

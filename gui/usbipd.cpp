@@ -6,8 +6,17 @@
 
 #define USBIP_SERVER_PORT 3240
 
-USBIPServer::USBIPServer(uvw::loop& loop, USBDevice& device) : loop(loop), device(device)
+USBIPServer::USBIPServer(uvw::loop& loop, USBDevice& device) : loop(loop), device(&device)
 {
+}
+
+void USBIPServer::Rebind(USBDevice* d)
+{
+    std::lock_guard devLock(deviceMutex);
+    std::lock_guard lock(mutex);
+    device = d;
+    buffer.pop(buffer.size());
+    state = USBIPState::WaitCommand;
 }
 
 void USBIPServer::Start()
@@ -109,8 +118,10 @@ static void FillIsocDesc(USBIP_ISOC_DESC* isoc, uint32_t number_of_packets, uint
 
 void USBIPServer::HandleURBRequest(USBIP_CMD_SUBMIT& req, uint8_t* data, std::size_t length, uvw::tcp_handle& client)
 {
+    std::lock_guard devLock(deviceMutex);
+    if (!device) return;   // machine being rebuilt after a reset: the host retries or re-plugs
     if (req.ep == 0) { // Control Endpoint #0
-        device.HandleSetupPacket(req.setup, data, length, [req=req, &client, this] (const uint8_t* data, std::size_t length) {
+        device->HandleSetupPacket(req.setup, data, length, [req=req, &client, this] (const uint8_t* data, std::size_t length) {
             Reply(client, req, data, length, nullptr);
         });
     } else if (req.direction) { // Device to Host
@@ -118,7 +129,7 @@ void USBIPServer::HandleURBRequest(USBIP_CMD_SUBMIT& req, uint8_t* data, std::si
         for (int i = 0; i < req.number_of_packets; i++) {
             isoc[i] = *((USBIP_ISOC_DESC*)data + i);
         }
-        device.HandleDataRead(req.ep, req.interval, req.transfer_buffer_length, [req=req, isoc=isoc, &client, this] (const uint8_t* data, std::size_t length) {
+        device->HandleDataRead(req.ep, req.interval, req.transfer_buffer_length, [req=req, isoc=isoc, &client, this] (const uint8_t* data, std::size_t length) {
             FillIsocDesc(const_cast<USBIP_ISOC_DESC*>(isoc.data()), req.number_of_packets, length);
             Reply(client, req, data, length, isoc.data());
         });
@@ -127,7 +138,7 @@ void USBIPServer::HandleURBRequest(USBIP_CMD_SUBMIT& req, uint8_t* data, std::si
         for (int i = 0; i < req.number_of_packets; i++) {
             isoc[i] = *((USBIP_ISOC_DESC*)(data + req.transfer_buffer_length) + i);
         }
-        device.HandleDataWrite(req.ep, req.interval, data, req.transfer_buffer_length, [req=req, isoc=isoc, &client, this]() {
+        device->HandleDataWrite(req.ep, req.interval, data, req.transfer_buffer_length, [req=req, isoc=isoc, &client, this]() {
             FillIsocDesc(const_cast<USBIP_ISOC_DESC*>(isoc.data()), req.number_of_packets, 0);
             Reply(client, req, nullptr, req.transfer_buffer_length, isoc.data());
         });
