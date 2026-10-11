@@ -451,6 +451,7 @@ HaltReason BlackFinCpu::Run() {
     const bool armed = time_.Cycles() >= batchAfterCycles_;
     const uint64_t batch = (armed && !laneUrgent_) ? batchCycles_ : 1;
     for (uint64_t executed = 0; executed < batch && !idle;) {
+        if (stopPc_ && cpuState_->pc == stopPc_) break;
         // Guest time at the start of this block: host time, or in deterministic
         // mode the packets every earlier block executed (see TimeSource).
         const uint64_t cyclesElapsed = time_.Cycles();

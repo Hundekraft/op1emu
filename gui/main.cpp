@@ -48,6 +48,7 @@ void LdrExecutionThread(BlackFinCpu& cpu, const LDRParser& parser) {
             }
             if (block.IsFirstBlock()) {
                 cpu.SetRegister(RegIndex::RETS, 0x8000000);
+                cpu.SetStopPc(0x8000000);
                 cpu.SetPC(block.header.target_address);
             }
         }
@@ -59,6 +60,7 @@ void LdrExecutionThread(BlackFinCpu& cpu, const LDRParser& parser) {
 
             if (cpu.PC() == 0x8000000) {
                 LogInfo("Finished executing DXE");
+                cpu.SetStopPc(0);
                 break;
             }
             if (cpu.PC() == 0xffa06e54) {

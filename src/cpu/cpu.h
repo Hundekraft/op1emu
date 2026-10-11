@@ -102,6 +102,7 @@ private:
     uint64_t lagPrevInterpNs_ = 0, lagPrevInterpSteps_ = 0; uint64_t lagRunMaxNs_ = 0, lagAfterMaxNs_ = 0, lagRunSumNs_ = 0; uint32_t lagRunMaxPc_ = 0;
     uint64_t paceStartNs_ = 0, paceCalls_ = 0, statsNextNs_ = 0, statsSleptNs_ = 0, statsMaxLagNs_ = 0;
     u32 breakPc_ = 0;
+    u32 stopPc_ = 0;
     std::set<u32> breakPcs_;
     uint32_t lastIpend_ = 0;
     unsigned breakHitsLeft_ = 4, breakHit_ = 0;
@@ -118,6 +119,9 @@ public:
     // True once the JIT could not translate or run a block. The CPU state is
     // then no longer advancing, so the host should stop instead of retrying.
     bool Failed() const { return failed_.load(std::memory_order_acquire); }
+    // Run() returns as soon as the pc reaches this address (0 = off). The LDR loader's return address for
+    // an init block: without it the stop depended on where a batch happened to end.
+    void SetStopPc(u32 pc) { stopPc_ = pc; }
 
     void QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay = std::chrono::nanoseconds(1));
 
