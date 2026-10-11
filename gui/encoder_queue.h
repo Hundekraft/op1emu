@@ -31,6 +31,21 @@ public:
         e.wheelAccum -= edges;
         Step(i, edges);
     }
+    // GUI mouse wheel / trackpad: one browser item per gesture step. macOS delivers one physical notch as a
+    // burst of events (scroll acceleration, momentum), so wheel events are ignored while an item is still
+    // being sent (stopping half-way would leave the encoder between items). Small trackpad deltas add up.
+    void Notch(size_t i, double delta) {
+        if (i >= enc_.size() || delta == 0) return;
+        auto& e = enc_[i];
+        const int dir = delta > 0 ? 1 : -1;
+        if (e.pending) { e.wheelAccum = 0; return; }
+        if ((e.wheelAccum > 0) != (dir > 0)) e.wheelAccum = 0;
+        e.wheelAccum += delta;
+        if (e.wheelAccum >= 1 || e.wheelAccum <= -1) {
+            e.wheelAccum = 0;
+            Step(i, dir * kEdgesPerStep);
+        }
+    }
     // Sends at most one queued edge per encoder whose time has come (now in seconds, any monotonic clock).
     void Pump(double now, const SetPin& set) {
         static constexpr int kSequence[] = {0, 2, 3, 1};  // bit 1 = clockwise pin, bit 0 = counter-clockwise pin

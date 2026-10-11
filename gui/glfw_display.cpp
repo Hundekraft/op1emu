@@ -434,15 +434,16 @@ void GLFWDisplay::ScrollCallback(GLFWwindow* window, double xoffset, double yoff
     glfwGetCursorPos(window, &x, &y);
     const int i = display->EncoderAt(x, y);
     if (i < 0) return;
-    display->encoderQueue_.Wheel(i, yoffset);
+    // Scrolling down (or the content moving up with natural scrolling) turns clockwise.
+    display->encoderQueue_.Notch(i, -yoffset);
 }
 
 void GLFWDisplay::CursorPosCallback(GLFWwindow* window, double x, double y) {
     (void)x;
     auto* display = static_cast<GLFWDisplay*>(glfwGetWindowUserPointer(window));
     if (!display || display->activeEncoder_ < 0) return;
-    // Vertical drag on a held encoder: up = clockwise.
-    display->dragAccum_ += display->dragLastY_ - y;
+    // Vertical drag on a held encoder: down = clockwise.
+    display->dragAccum_ += y - display->dragLastY_;
     display->dragLastY_ = y;
     while (display->dragAccum_ >= kDragPixelsPerEdge) {
         display->StepEncoder(display->activeEncoder_, 1);
