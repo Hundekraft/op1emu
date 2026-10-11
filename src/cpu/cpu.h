@@ -96,6 +96,9 @@ private:
     uint64_t interpSteps_ = 0, interpBails_ = 0, statsInterpSteps_ = 0, statsInterpBails_ = 0;
     void Pace();
     void PrefetchPack();
+    void PrefetchStep();
+    size_t prefetchQueued_ = 0;
+    uint64_t prefetchScanNs_ = 0;
     uint64_t prefetchAgainNs_ = 0;
     uint64_t lagPrevHostNs_ = 0, lagPrevGuestNs_ = 0, lagPrevBatches_ = 0, lagPrevMmr_ = 0;   // OP1EMU_LAG_LOG
     bool lagLogOn_ = false; bool pcProf_ = false; std::unordered_map<uint32_t, std::pair<uint64_t, uint64_t>> pcProfNs_;   // OP1EMU_PC_PROF

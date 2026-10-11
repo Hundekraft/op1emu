@@ -587,6 +587,7 @@ HaltReason BlackFinCpu::Run() {
         AfterBlock(batchStart);
         if (lagLogOn_) lagAfterMaxNs_ = std::max(lagAfterMaxNs_, HostNowNs() - lagT0);
     }
+    if (core_->prefetch_active()) PrefetchStep();
     if (idle) IdleUntilInterrupt();
     if (realtime_ && (++paceCalls_ & 255) == 0) Pace();
     return HaltReason::Break;
@@ -706,10 +707,19 @@ void BlackFinCpu::VerifyAgainst(u32 pc, const CpuState& in, const std::map<uint3
 // when a new screen comes up). OP1EMU_PREFETCH=0 turns it off.
 void BlackFinCpu::PrefetchPack() {
     if (const char* e = getenv("OP1EMU_PREFETCH"); e && e[0] == '0') return;
+    core_->prefetch_pack();
+    prefetchQueued_ = 0;
+    prefetchScanNs_ = 0;
+}
+
+// One slice of the scan per Run(): 512 index entries take ~2 ms at most, so the scan never stalls the guest.
+void BlackFinCpu::PrefetchStep() {
     const auto t0 = std::chrono::steady_clock::now();
-    const size_t n = core_->prefetch_pack();
-    if (n) LogInfo("JIT: preloading %zu cached blocks in the background (queued in %.1f ms)", n,
-                   std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    prefetchQueued_ += core_->prefetch_step(512);
+    prefetchScanNs_ += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+    if (!core_->prefetch_active() && prefetchQueued_)
+        LogInfo("JIT: preloading %zu cached blocks in the background (scan %.1f ms, in slices)", prefetchQueued_,
+                prefetchScanNs_ / 1e6);
 }
 
 void BlackFinCpu::UpdateAsyncCompile() {

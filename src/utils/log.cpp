@@ -24,6 +24,9 @@ void SetLogLevel(LogLevel level)
 static void LogImpl(LogLevel level, const char* format, va_list args)
 {
     auto l = levelConverter.find(level)->second;
+    // Skip the formatting when the level is off: unmapped-memory reads log at debug level, and hashing
+    // guest code that touches such addresses spent most of its time in vsnprintf.
+    if (!spd::default_logger_raw()->should_log(l)) return;
 
     va_list copy;
     va_copy(copy, args);
