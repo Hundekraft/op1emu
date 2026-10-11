@@ -52,6 +52,7 @@ public:
         for (auto& e : enc_) {
             if (!e.pending || now < e.nextEdge) continue;
             e.phase = (e.phase + (e.pending > 0 ? 1 : 3)) % 4;
+            e.position += e.pending > 0 ? 1 : -1;
             e.pending += e.pending > 0 ? -1 : 1;
             const int value = kSequence[e.phase];
             set(e.pins.cwBank, e.pins.cwIndex, (value & 2) != 0);
@@ -59,6 +60,8 @@ public:
             e.nextEdge = now + kEdgeSeconds;
         }
     }
+    // Net edges sent so far (+cw / -ccw): the GUI turns the knob cap by this.
+    long Position(size_t i) const { return i < enc_.size() ? enc_[i].position : 0; }
     bool Idle() const {
         return std::all_of(enc_.begin(), enc_.end(), [](const Encoder& e) { return e.pending == 0; });
     }
@@ -67,6 +70,7 @@ private:
     struct Encoder {
         Pins pins;
         int phase = 0, pending = 0;
+        long position = 0;
         double nextEdge = 0, wheelAccum = 0;
     };
     std::vector<Encoder> enc_;
