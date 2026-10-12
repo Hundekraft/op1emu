@@ -3,6 +3,8 @@
 #include <utils/log.h>
 #include <cassert>
 #include <cstring>
+#include <cstdlib>
+#include <stdexcept>
 
 #define USBIP_SERVER_PORT 3240
 
@@ -21,6 +23,14 @@ void USBIPServer::Rebind(USBDevice* d)
 
 void USBIPServer::Start()
 {
+    int port = USBIP_SERVER_PORT;
+    if (const char* value = std::getenv("OP1EMU_USBIP_PORT")) {
+        char* end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (!*value || *end || parsed < 1 || parsed > 65535)
+            throw std::runtime_error("OP1EMU_USBIP_PORT must be 1..65535");
+        port = static_cast<int>(parsed);
+    }
     server = loop.resource<uvw::tcp_handle>();
     server->on<uvw::listen_event>([this] (const uvw::listen_event&, uvw::tcp_handle& srv) {
         auto client = srv.parent().resource<uvw::tcp_handle>();
@@ -37,8 +47,9 @@ void USBIPServer::Start()
         srv.accept(*client);
         client->read();
     });
-    server->bind("127.0.0.1", USBIP_SERVER_PORT);
-    server->listen();
+    if (server->bind("127.0.0.1", port) < 0 || server->listen() < 0)
+        throw std::runtime_error("Cannot bind USB/IP port " + std::to_string(port));
+    LogInfo("USB/IP listening on 127.0.0.1:%d", port);
 }
 
 void USBIPServer::ReplyImport(OP_REQ_IMPORT& req, uvw::tcp_handle& client)
