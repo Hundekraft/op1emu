@@ -141,6 +141,22 @@ void GLFWDisplay::LoadUIConfig(const std::string& path) {
         }
     }
 
+    // Computer keyboard as the OP-1's: host key name -> OP-1 button name (from "buttons")
+    if (j.contains("keyboard")) {
+        for (auto& [key, button] : j["keyboard"].items()) {
+            for (const auto& b : uiConfig_.buttons) {
+                if (b.name != button.get<std::string>()) continue;
+                KeycapConfig keycap;
+                keycap.name = key;
+                keycap.bank = b.bank;
+                keycap.index = b.index;
+                keycap.glfwKey = MapKeyNameToGLFW(key);
+                if (keycap.glfwKey != GLFW_KEY_UNKNOWN) uiConfig_.keycaps.push_back(keycap);
+                break;
+            }
+        }
+    }
+
     // Parse encoders
     if (j.contains("encoders")) {
         for (auto& [name, enc] : j["encoders"].items()) {
@@ -583,6 +599,14 @@ int GLFWDisplay::MapKeyNameToGLFW(const std::string& keyName) {
     if (keyName == "down") return GLFW_KEY_DOWN;
     if (keyName == "left") return GLFW_KEY_LEFT;
     if (keyName == "right") return GLFW_KEY_RIGHT;
+
+    // Punctuation by US key position (GLFW key codes are layout independent)
+    if (keyName == ";") return GLFW_KEY_SEMICOLON;
+    if (keyName == "'") return GLFW_KEY_APOSTROPHE;
+    if (keyName == "[") return GLFW_KEY_LEFT_BRACKET;
+    if (keyName == "]") return GLFW_KEY_RIGHT_BRACKET;
+    if (keyName == ",") return GLFW_KEY_COMMA;
+    if (keyName == ".") return GLFW_KEY_PERIOD;
 
     // Single character keys (a-z, 0-9)
     if (keyName.length() == 1) {
