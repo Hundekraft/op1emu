@@ -257,7 +257,8 @@ void SPORT::LogConfig(const char* dir)
         if (const char* d = std::getenv("OP1EMU_AUDIO_DUMP")) {
             const std::string path = std::string(d) + "/sport" + std::to_string(sportNumber) + ".raw";
             dump_ = std::fopen(path.c_str(), "wb");
-            if (dump_) LogInfo("SPORT%d: dumping TX samples to %s", sportNumber, path.c_str());
+            if (dump_) LogInfo("SPORT%d: dumping TX samples to %s from guest_ns=%llu", sportNumber, path.c_str(),
+                                (unsigned long long)time_.Nanoseconds());
         }
     }
 }
