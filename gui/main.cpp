@@ -5,6 +5,8 @@
 #include "glfw_display.h"
 #include "headless.h"
 #include "audio_output_miniaudio.h"
+#include "test_audio_input.h"
+#include "cpu/sport.h"
 #include "usbipd.h"
 #ifdef ENABLE_PROFILING
 #include "profiling/profiler.h"
@@ -266,10 +268,20 @@ static int RunEmulator(int argc, char* argv[]) {
     // host sink. Avoid opening ALSA/PulseAudio devices on headless hosts.
     std::shared_ptr<MiniaudioOutput> audioOutput;
     if (!headless) audioOutput = std::make_shared<MiniaudioOutput>();
+    std::shared_ptr<TestAudioInput> audioInput;
+    if (const char* setting = std::getenv("OP1EMU_TEST_INPUT_HZ")) {
+        char* end = nullptr;
+        const long hz = std::strtol(setting, &end, 10);
+        if (end == setting || *end || hz < 1 || hz > SPORT::kSampleRateHz / 2)
+            throw std::invalid_argument("OP1EMU_TEST_INPUT_HZ must be 1..11025");
+        audioInput = std::make_shared<TestAudioInput>(static_cast<unsigned>(hz), SPORT::kSampleRateHz);
+        LogInfo("Diagnostic SPORT0 input: %ld Hz square wave, quarter scale", hz);
+    }
     auto attachFrontends = [&]() {
         cpu->AttachDisplay(display);
         cpu->AttachKeyboard(keyboard);
         if (audioOutput) cpu->AttachAudioOutput(audioOutput);
+        if (audioInput) cpu->AttachAudioInput(audioInput);
         cpu->SetJitCacheDir(jitCacheDir);
         cpu->SetBootMode(0x0D); // Set BMODE to 0b1101, boot from NAND flash with port H
     };

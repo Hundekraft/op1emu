@@ -33,6 +33,7 @@
 #include "peripheral/keyboard.h"
 #include "peripheral/potentiometer.h"
 #include "peripheral/audio_output.h"
+#include "peripheral/audio_input.h"
 #include "utils/log.h"
 
 #include "core.h"
@@ -1053,6 +1054,12 @@ void BlackFinCpu::AttachKeyboard(const std::shared_ptr<Keyboard>& keyboard) {
             // Map keyboard events to GPIO expander pins
             gpioExpanders[bank]->SetPinInput(index, pressed ? GPIOPinLevel::Low : GPIOPinLevel::High);
         });
+    });
+}
+
+void BlackFinCpu::AttachAudioInput(const std::shared_ptr<AudioInput>& audioInput) {
+    sport0->SetAudioInputCallback([audioInput](void* data, size_t frames, int channels, int bits) {
+        return audioInput->ReadSamples(data, frames, channels, bits);
     });
 }
 

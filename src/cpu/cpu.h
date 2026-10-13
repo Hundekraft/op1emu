@@ -38,6 +38,7 @@ class GPTimer;
 class USBDevice;
 class NandFlash;
 class Keyboard;
+class AudioInput;
 class MCP230XX;
 class ADXL345;
 class Potentiometer;
@@ -136,6 +137,7 @@ public:
     void AttachKeyboard(const std::shared_ptr<Keyboard>& keyboard);
     void AttachNandFlash(const std::shared_ptr<NandFlash>& nandFlash);
     void AttachAudioOutput(const std::shared_ptr<AudioOutput>& audioOutput);
+    void AttachAudioInput(const std::shared_ptr<AudioInput>& audioInput);
     void SetAcceleration(int16_t x, int16_t y, int16_t z);
     void SetPotentiometerValue(u8 value);
 
