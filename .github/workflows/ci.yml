@@ -70,7 +70,7 @@ jobs:
       - name: Test (synthetic inputs only, no NAND or firmware)
         # The -R filter keeps out bcore's comparison_test, which is registered
         # whenever a bfin toolchain is on PATH.
-        run: ctest --test-dir build -R "headless-test|time-source-test|ldr-smoke|mark-set-test|service-stats-test|profile-smoke" --output-on-failure
+        run: ctest --test-dir build -R "headless-test|time-source-test|data-fault-test|ldr-smoke|mark-set-test|service-stats-test|profile-smoke" --output-on-failure
 
       - name: CLI sanity
         run: ./build/op1emu --help

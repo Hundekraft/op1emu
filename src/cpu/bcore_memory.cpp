@@ -1,4 +1,5 @@
 #include "bcore_memory.h"
+#include "utils/log.h"
 #ifdef ENABLE_PROFILING
 #include "profiling/memory_census.h"
 #include "profiling/profiler.h"
@@ -59,4 +60,12 @@ void EmulatorMemory::write32(uint32_t addr, uint32_t val) {
 
 const uint8_t* EmulatorMemory::raw() const {
     return nullptr;
+}
+
+void EmulatorMemory::data_alignment_fault(uint32_t pc, uint32_t addr, uint32_t status) {
+    emulator_.MemoryWrite32(0xFFE00008, status);              // DCPLB_FAULT_STATUS
+    emulator_.MemoryWrite32(0xFFE0000C, addr);                // DCPLB_FAULT_ADDR
+    emulator_.MemoryWrite32(0xFFE01008, status & (1u << 17)); // ICPLB_FAULT_STATUS: supervisor bit only
+    emulator_.MemoryWrite32(0xFFE0100C, pc);                  // ICPLB_FAULT_ADDR: the faulting instruction
+    LogWarn("Data alignment fault: PC=%08x ADDR=%08x STATUS=%08x", pc, addr, status);
 }

@@ -25,6 +25,8 @@ public:
     void write16(uint32_t addr, uint16_t val) override;
     void write32(uint32_t addr, uint32_t val) override;
 
+    // Records the fault in DCPLB_FAULT_STATUS/ADDR and ICPLB_FAULT_STATUS/ADDR for the guest's EVT3 handler.
+    void data_alignment_fault(uint32_t pc, uint32_t addr, uint32_t status) override;
     const uint8_t* raw() const override;
 
     uint32_t rawmem_limit() const override { return 0; }
