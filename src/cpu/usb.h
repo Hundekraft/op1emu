@@ -8,6 +8,8 @@
 #include <queue>
 #include <memory>
 
+class TimeSource;
+
 struct __attribute__ ((__packed__)) USBSetupBytes {
     union {
         struct {
@@ -32,12 +34,15 @@ struct __attribute__ ((__packed__)) USBSetupBytes {
 class USBDevice {
 public:
     virtual ~USBDevice() {}
+    virtual void SetHostConnected(bool connected) {}
 
     using ReplyCallback = std::function<void(const u8*, std::size_t)>;
+    using IsoReplyCallback = std::function<void(const std::vector<u8>&, const std::vector<u32>&)>;
     using WriteDoneCallback = std::function<void()>;
 
     virtual void HandleSetupPacket(USBSetupBytes setup, const u8* data, std::size_t length, ReplyCallback callback) = 0;
     virtual void HandleDataWrite(int ep, int interval, const u8* data, std::size_t length, WriteDoneCallback callback) = 0;
+    virtual void HandleIsoRead(int ep, int interval, const std::vector<u32>& sizes, IsoReplyCallback callback) = 0;
     virtual void HandleDataRead(int ep, int interval, std::size_t limit, ReplyCallback callback) = 0;
 };
 
@@ -62,6 +67,11 @@ struct USBEndpoint {
     std::vector<uint8_t> rxBuffer;
     USBDevice::WriteDoneCallback rxCallback = nullptr;
 
+    USBDevice::IsoReplyCallback isoCallback = nullptr;
+    std::vector<u32> isoLimits;
+    std::vector<u32> isoLengths;
+    std::vector<u8> isoData;
+
     u16 txCount = 0;
 
     u16 txMaxPacketSize = 0;
@@ -71,6 +81,9 @@ struct USBEndpoint {
     bool dmaMode1Enabled = false;
     bool dmaRequestEnabled = false;
     bool isocTransferEnabled = false;
+    bool txUnderrun = false;
+    u64 nextTxPollNs = 0;
+    u64 txPollPeriodNs = 1000000;
     bool dataPacketInFIFOAutoSet = false;
     bool dataPacketReceivedAutoClear = false;
     u16 rxMaxPacketSize = 0;
@@ -90,7 +103,8 @@ struct USBDMAChannel {
 
 class USB: public RegisterDevice, public USBDevice {
 public:
-    USB(u32 baseAddr);
+    USB(u32 baseAddr, const TimeSource& time);
+    void SetHostConnected(bool connected) override;
 
     void BindInterrupt(int int0, int int1, int int2, int dmaint, InterruptHandler callback);
 
@@ -99,6 +113,7 @@ public:
 
     void HandleSetupPacket(USBSetupBytes setup, const u8* data, std::size_t length, ReplyCallback callback) override;
     void HandleDataWrite(int ep, int interval, const u8* data, std::size_t length, WriteDoneCallback callback) override;
+    void HandleIsoRead(int ep, int interval, const std::vector<u32>& sizes, IsoReplyCallback callback) override;
     void HandleDataRead(int ep, int interval, std::size_t limit, ReplyCallback callback) override;
 
     void ProcessWithInterrupt(int ivg) override;
@@ -115,6 +130,12 @@ protected:
     std::size_t readDeviceToHostFIFO(int ep, u8* data, std::size_t length);
 
 protected:
+    const TimeSource& time_;
+    bool hostConnected_ = false;
+    u64 nextFrameNs_ = 0;
+    const bool debugLog_;
+    unsigned debugWrites_ = 0;
+    bool debugTxIrq_ = false;
     // Connection state
     bool connected = false;
 
@@ -129,6 +150,7 @@ protected:
     u8 epRxIntsEnabled = 0xFF;
 
     bool sofDetected = false;
+    bool resetDetected = false;
     u8 commonIntsEnabled = 0x06;
 
     u16 frameNumber = 0;

@@ -1,8 +1,10 @@
 #include "usb.h"
+#include "time_source.h"
 #include "emu.h"
 #include "utils/log.h"
 #include <cstring>
 #include <algorithm>
+#include <cstdlib>
 
 // TODO: support HOST mode
 
@@ -17,7 +19,7 @@ static constexpr inline int GetMaxFIFOSize(int ep) {
     return USB_EP_FIFO_SIZE_LARGE;
 }
 
-USB::USB(u32 baseAddr): RegisterDevice("USB", baseAddr, 0x500) {
+USB::USB(u32 baseAddr, const TimeSource& time): RegisterDevice("USB", baseAddr, 0x500), time_(time), debugLog_(std::getenv("OP1EMU_USB_LOG") != nullptr) {
     REG32(USB_FADDR, 0x00);
     FIELD(USB_FADDR, FUNCTION_ADDRESS, 0, 7, R(funcAddr), W(funcAddr));
 
@@ -37,7 +39,8 @@ USB::USB(u32 baseAddr): RegisterDevice("USB", baseAddr, 0x500) {
     FIELD(USB_INTRRXE, VAL, 0, 8, R(epRxIntsEnabled), W(epRxIntsEnabled));
 
     REG32(USB_INTRUSB, 0x18);
-    FIELD(USB_INTRUSB, SOF_B, 3, 0, R(sofDetected), W1C(sofDetected));
+    FIELD(USB_INTRUSB, RESET_B, 2, 1, R(resetDetected), W1C(resetDetected));
+    FIELD(USB_INTRUSB, SOF_B, 3, 1, R(sofDetected), W1C(sofDetected));
     REG32(USB_INTRUSBE, 0x1C);
     FIELD(USB_INTRUSBE, VAL, 0, 8, R(commonIntsEnabled), W(commonIntsEnabled));
 
@@ -56,6 +59,7 @@ USB::USB(u32 baseAddr): RegisterDevice("USB", baseAddr, 0x500) {
     FIELD(USB_GLOBINTR, TX_INT1_R, 5, 1, R(txIntsToINT1), W(txIntsToINT1));
     FIELD(USB_GLOBINTR, USB_INT2_R, 6, 1, R(commonIntsToINT2), W(commonIntsToINT2));
     FIELD(USB_GLOBINTR, RX_INT2_R, 7, 1, R(rxIntsToINT2), W(rxIntsToINT2));
+    FIELD(USB_GLOBINTR, TX_INT2_R, 8, 1, R(txIntsToINT2), W(txIntsToINT2));
 
     REG32(USB_GLOBAL_CTL, 0x30);
     FIELD(USB_GLOBAL_CTL, GLOBAL_ENA, 0, 1, R(enabled), W(enabled));
@@ -168,11 +172,16 @@ USB::USB(u32 baseAddr): RegisterDevice("USB", baseAddr, 0x500) {
         if (i != 0) {
             REG32(USB_EP_NIx_TXCSR, 0x204 + i * 0x40);
             FIELD(USB_EP_NIx_TXCSR, TXPKTRDY_T, 0, 1, R(endpoints[i].dataPacketInFIFO), W(endpoints[i].dataPacketInFIFO));
-            FIELD(USB_EP_NIx_TXCSR, FIFO_NOT_EMPTY_T, 1, 1, R(endpoints[i].txFifo.size() >= endpoints[i].txMaxPacketSize), N());
-            FIELD(USB_EP_NIx_TXCSR, FLUSHFIFO_T, 3, 1, R(0), [this](u32 v) {
-                if (v) {
+            FIELD(USB_EP_NIx_TXCSR, FIFO_NOT_EMPTY_T, 1, 1, R(!endpoints[i].txFifo.empty()), N());
+            FIELD(USB_EP_NIx_TXCSR, UNDERRUN_T, 2, 1, R(endpoints[i].txUnderrun), W(endpoints[i].txUnderrun));
+            FIELD(USB_EP_NIx_TXCSR, FLUSHFIFO_T, 3, 1, R(0), N());
+            // Apply flush after all fields, independent of field-name ordering.
+            USB_EP_NIx_TXCSR.writeCallback = [this, i](u32 v) {
+                if (v & 8) {
+                    endpoints[i].txFifo = {};
+                    endpoints[i].dataPacketInFIFO = false;
                 }
-            });
+            };
             FIELD(USB_EP_NIx_TXCSR, DMAREQMODE_T, 10, 1, R(endpoints[i].dmaMode1Enabled), W(endpoints[i].dmaMode1Enabled));
             FIELD(USB_EP_NIx_TXCSR, DMAREQ_ENA_T, 12, 1, R(endpoints[i].dmaRequestEnabled), W(endpoints[i].dmaRequestEnabled));
             FIELD(USB_EP_NIx_TXCSR, ISO_T, 14, 1, R(endpoints[i].isocTransferEnabled), W(endpoints[i].isocTransferEnabled));
@@ -269,6 +278,13 @@ void USB::Read(u32 offset, void* buffer, u32 length) {
 }
 
 void USB::Write(u32 offset, const void* buffer, u32 length) {
+    if (debugLog_ && debugWrites_ < 80 &&
+        (offset >= 0x400 || offset == 0x384 || (offset == 0x08 && (*(const u8*)buffer & 0x41)) || (offset == 0x44 && index == 6))) {
+        u32 value = 0;
+        std::memcpy(&value, buffer, std::min(length, u32(4)));
+        LogInfo("USB write offset=%03x value=%08x", offset, value);
+        ++debugWrites_;
+    }
     RegisterDevice::Write(offset, buffer, length);
 }
 
@@ -340,9 +356,7 @@ void USB::UpdateInterrupts() {
     bool int2 = false;
     // Check USB interrupts
     // Same values as Read32() of these registers, read directly: this runs after every guest block.
-    // USB_INTRUSB's only field is declared with length 0 at offset 3; MAKE_32BIT_MASK(3, 0) evaluates
-    // to 0xFFFFFFF8 on the hosts we run on (shift count taken mod 32), so the register reads SOF << 3.
-    u32 intrusb = sofDetected ? 0x8u : 0u;
+    u32 intrusb = (sofDetected ? 0x8u : 0u) | (resetDetected ? 0x4u : 0u);
     u32 intrusbe = commonIntsEnabled;
     if (intrusb & intrusbe) {
         int0 |= commonIntsToINT0;
@@ -368,6 +382,13 @@ void USB::UpdateInterrupts() {
         int2 |= rxIntsToINT2;
     }
 
+    if (debugLog_ && !debugTxIrq_ && (intrtx & 0x40)) {
+        LogInfo("USB first EP6 interrupt: irq%d=%d irq%d=%d irq%d=%d txmask=%02x routes=%d/%d/%d",
+                int0Irq, int0, int1Irq, int1, int2Irq, int2, epTxIntsEnabled,
+                txIntsToINT0, txIntsToINT1, txIntsToINT2);
+        debugTxIrq_ = true;
+    }
+
     interruptHandlers[int0Irq](int0Irq, int0 ? 1 : 0);
     interruptHandlers[int1Irq](int1Irq, int1 ? 1 : 0);
     interruptHandlers[int2Irq](int2Irq, int2 ? 1 : 0);
@@ -385,19 +406,52 @@ void USB::BindInterrupt(int int0, int int1, int int2, int dmaint, InterruptHandl
     RegisterDevice::BindInterrupt(dmaint, callback);
 }
 
+void USB::SetHostConnected(bool present) {
+    std::lock_guard<std::mutex> lock(mutex);
+    hostConnected_ = present;
+    nextFrameNs_ = 0;
+    sofDetected = false;
+    resetDetected = present;
+    if (present) {
+        funcAddr = 0;
+        frameNumber = 0;
+    }
+    highSpeedMode = present && highSpeedEnabled;
+    if (!present) {
+        setupCallback = nullptr;
+        for (auto& ep : endpoints) {
+            ep.txCallback = nullptr;
+            ep.isoCallback = nullptr;
+            ep.isoLimits.clear();
+            ep.isoLengths.clear();
+            ep.isoData.clear();
+            ep.rxCallback = nullptr;
+            ep.txBuffer.clear();
+            ep.rxBuffer.clear();
+            ep.nextTxPollNs = 0;
+        }
+    }
+}
+
 void USB::HandleSetupPacket(USBSetupBytes setup, const u8* data, std::size_t length, ReplyCallback callback) {
     std::lock_guard<std::mutex> lock(mutex);
+    if (debugLog_)
+        LogInfo("USB setup: type=%02x request=%02x value=%04x index=%04x length=%u",
+                setup.bmRequestType, setup.bRequest, setup.wValue, setup.wIndex, setup.wLength);
 
     auto& ep0 = endpoints[0];
 
     size_t maxSize = GetMaxFIFOSize(0);
-    if (length + sizeof(USBSetupBytes) > maxSize - ep0.rxFifo.size()) {
+    if (sizeof(USBSetupBytes) > maxSize - ep0.rxFifo.size()) {
         LogError("USB: Setup packet data too large for EP0 FIFO");
         return;
     }
 
     writeHostToDeviceFIFO(0, reinterpret_cast<const u8*>(&setup), sizeof(USBSetupBytes));
-    writeHostToDeviceFIFO(0, data, length);
+    // SETUP is its own packet. Deliver the OUT data only after firmware
+    // services SETUP; coalescing them loses the data-stage interrupt.
+    ep0.rxBuffer.clear();
+    if (length) ep0.rxBuffer.insert(ep0.rxBuffer.end(), data, data + length);
     setupCallback = callback;
     ep0.dataPacketReceived = true;
     epTxInterrupts |= (1 << 0);
@@ -423,20 +477,101 @@ void USB::HandleDataRead(int ep, int interval, std::size_t limit, ReplyCallback 
     std::lock_guard<std::mutex> lock(mutex);
 
     auto& endpoint = endpoints[ep];
+    if (debugLog_)
+        LogInfo("USB IN ep%d: length=%zu interval=%d enabled=%02x iso=%d maxpacket=%u fifo=%zu buffered=%zu SOFmask=%02x frame=%u TXirq=%02x TXmask=%02x DMA=%d/%d",
+                ep, limit, interval, epTxEnabled, endpoint.isocTransferEnabled,
+                endpoint.txMaxPacketSize, endpoint.txFifo.size(), endpoint.txBuffer.size(), commonIntsEnabled, frameNumber,
+                epTxInterrupts, epTxIntsEnabled, endpoint.dmaRequestEnabled, endpoint.dmaMode1Enabled);
+    if (debugLog_)
+        for (int i = 0; i < USB_NUM_DMA_CHANNELS; ++i)
+            if (dmaChannels[i].enabled)
+                LogInfo("USB DMA%d ep%d dir=%d mode=%d address=%08x count=%u", i, dmaChannels[i].epnum,
+                        dmaChannels[i].txDirection, dmaChannels[i].mode1, dmaChannels[i].addr, dmaChannels[i].count);
     endpoint.txLimit = limit;
     endpoint.txCallback = callback;
+    // USB/IP intervals for high-speed periodic endpoints are in microframes.
+    // Older clients submit no interval; the OP-1 audio endpoint uses 1 ms.
+    endpoint.txPollPeriodNs = (interval > 0 ? u64(interval) * (highSpeedMode ? 125000ull : 1000000ull)
+                                           : 1000000ull) * time_.Slowdown();
+}
+
+void USB::HandleIsoRead(int ep, int interval, const std::vector<u32>& sizes, IsoReplyCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& endpoint = endpoints[ep];
+    endpoint.isoLimits = sizes;
+    endpoint.isoLengths.clear();
+    endpoint.isoData.clear();
+    endpoint.isoCallback = callback;
+    endpoint.txPollPeriodNs = (interval > 0 ? u64(interval) * (highSpeedMode ? 125000ull : 1000000ull)
+                                           : 1000000ull) * time_.Slowdown();
 }
 
 void USB::ProcessTransfer() {
     if (!enabled) return;
     std::lock_guard<std::mutex> lock(mutex);
 
+    // USB_FRAME is an 11-bit millisecond frame number, including at high speed.
+    // Drive it from guest time; host polling frequency must not set the audio rate.
+    if (hostConnected_ && connected) {
+        const u64 now = time_.Nanoseconds();
+        const u64 period = 1000000ull * time_.Slowdown();
+        if (!nextFrameNs_) nextFrameNs_ = now + period;
+        if (now >= nextFrameNs_) {
+            const u64 elapsed = 1 + (now - nextFrameNs_) / period;
+            frameNumber = (frameNumber + elapsed) & 0x7ff;
+            nextFrameNs_ += elapsed * period;
+            sofDetected = true;
+        }
+    } else {
+        nextFrameNs_ = 0;
+    }
+
     for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
         auto& ep = endpoints[i];
         // Process TX endpoints
         if ((epTxEnabled & (1 << i))) {
+            const bool periodic = ep.isocTransferEnabled && i != 0;
+            bool poll = true;
+            if (periodic) {
+                const u64 now = time_.Nanoseconds();
+                poll = (ep.txCallback || ep.isoCallback) && hostConnected_ && now >= ep.nextTxPollNs;
+                if (poll) {
+                    // Keep the host polling phase independent of CPU block/poll latency.
+                    // Re-anchoring every token at "now" slowly drifts from the USB clock.
+                    ep.nextTxPollNs = ep.nextTxPollNs
+                        ? ep.nextTxPollNs + (1 + (now - ep.nextTxPollNs) / ep.txPollPeriodNs) * ep.txPollPeriodNs
+                        : now + ep.txPollPeriodNs;
+                    if (!ep.dataPacketInFIFO) {
+                        // An IN token at an empty isochronous FIFO causes an underrun
+                        // interrupt. This also lets firmware prime the next packet.
+                        ep.txUnderrun = true;
+                        epTxInterrupts |= (1 << i);
+                    }
+                }
+            }
+            if (periodic && poll && ep.isoCallback) {
+                // Preserve actual packet boundaries, including empty polls. USB/IP
+                // carries packed payload bytes plus each packet's actual length.
+                const auto limit = ep.isoLimits[ep.isoLengths.size()];
+                u32 count = 0;
+                if (ep.dataPacketInFIFO) {
+                    while (!ep.txFifo.empty()) {
+                        const u8 byte = ep.txFifo.front();
+                        ep.txFifo.pop();
+                        if (count < limit) { ep.isoData.push_back(byte); ++count; }
+                    }
+                    ep.dataPacketInFIFO = false;
+                    epTxInterrupts |= (1 << i);
+                }
+                ep.isoLengths.push_back(count);
+                if (ep.isoLengths.size() == ep.isoLimits.size()) {
+                    ep.isoCallback(ep.isoData, ep.isoLengths);
+                    ep.isoCallback = nullptr;
+                }
+                poll = false; // packet has already been consumed
+            }
             ep.txBuffer.reserve(ep.txFifo.size() + ep.txBuffer.size());
-            if (ep.dataPacketInFIFO) {
+            if (ep.dataPacketInFIFO && poll) {
                 while (!ep.txFifo.empty()) {
                     ep.txBuffer.push_back(ep.txFifo.front());
                     ep.txFifo.pop();
@@ -460,7 +595,8 @@ void USB::ProcessTransfer() {
             }
             if (ep.rxFifo.size() > 0) {
                 ep.dataPacketReceived = true;
-                epRxInterrupts |= (1 << i);
+                if (i == 0) epTxInterrupts |= 1;
+                else epRxInterrupts |= (1 << i);
             } else if (ep.rxCallback) {
                 ep.rxCallback();
                 ep.rxCallback = nullptr;
