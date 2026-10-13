@@ -2,6 +2,7 @@
 
 // bcore headers (from ext/bcore/include/)
 #include "mem.h"
+#include <set>
 
 // op1emu headers
 #include "emu.h"
@@ -24,6 +25,9 @@ public:
     void write16(uint32_t addr, uint16_t val) override;
     void write32(uint32_t addr, uint32_t val) override;
 
+    void data_alignment_fault(uint32_t pc, uint32_t addr, uint32_t status) override;
+    bool strict_data_checks() const override { return strictData_; }
+    uint32_t check_data_access(uint32_t pc, uint32_t addr, uint32_t width, uint32_t flags, bool record = true) override;
     const uint8_t* raw() const override;
 
     // Guest addresses below rawmem_limit() are plain SDRAM at fast_base() + addr; bcore inlines those
@@ -43,6 +47,11 @@ public:
 
 private:
     Emulator& emulator_;
+    bool strictData_ = false;
+    bool cplbDirty_ = true;
+    uint32_t dmemControl_ = 0, cplbAddress_[16]{}, cplbData_[16]{};
+    void refreshDataProtection();
+    std::set<uint32_t> unknownMmrs_;
     mutable bool mmrTouched_ = false;
 
     FastRange ranges_[8];

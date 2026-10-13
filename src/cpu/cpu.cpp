@@ -203,7 +203,7 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
 
     devices.emplace_back(std::make_shared<EBIU>(0xFFC00A00));
     devices.emplace_back(std::make_shared<OTP>(0xFFC03600, "otp.bin"));
-    std::shared_ptr<USB> usb = std::make_shared<USB>(0xFFC03800);
+    std::shared_ptr<USB> usb = std::make_shared<USB>(0xFFC03800, time_);
     usb->BindInterrupt(IRQ_USB_INT0, IRQ_USB_INT1, IRQ_USB_INT2, IRQ_USB_DMAINT, irqHandler);
     devices.emplace_back(usb);
     this->usb = usb;
@@ -568,6 +568,11 @@ HaltReason BlackFinCpu::Run() {
                 failed_.store(true, std::memory_order_release);
                 return HaltReason::Break;
             }
+        }
+        if (cpuState_->halted) {
+            LogError("Guest CPU halted at PC=0x%08x (code=%d)", cpuState_->pc, cpuState_->exit_code);
+            failed_.store(true, std::memory_order_release);
+            return HaltReason::Break;
         }
         if (verifySteps && !verifyMem->touchedMmr() && verifyState.pc == cpuState_->pc && cpuState_->packets == verifySteps) VerifyAgainst(verifyPc, verifyState, verifyMem->writes());
         time_.Retire(cpuState_->packets);

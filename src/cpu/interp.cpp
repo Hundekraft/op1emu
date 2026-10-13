@@ -12,6 +12,9 @@ uint32_t Read32(void* m, uint32_t a) { return static_cast<Memory*>(m)->read32(a)
 void Write8(void* m, uint32_t a, uint8_t v) { static_cast<Memory*>(m)->write8(a, v); }
 void Write16(void* m, uint32_t a, uint16_t v) { static_cast<Memory*>(m)->write16(a, v); }
 void Write32(void* m, uint32_t a, uint32_t v) { static_cast<Memory*>(m)->write32(a, v); }
+int CheckData(void* m, uint32_t pc, uint32_t a, uint32_t width, uint32_t flags) {
+    return static_cast<Memory*>(m)->check_data_access(pc, a, width, flags, false) != 0;
+}
 }  // namespace
 
 namespace {
@@ -44,7 +47,7 @@ unsigned Interpreter::Run(CpuState* cpu, Memory* mem, bool userMode, unsigned ma
     r.pc = cpu->pc; r.usp = cpu->usp; r.ksp = cpu->ksp; r.seqstat = cpu->seqstat; r.syscfg = cpu->syscfg;
     r.astat = astat_compose(cpu);
 
-    interp_glue_mem m{mem, Read8, Read16, Read32, Write8, Write16, Write32, {}, 0};
+    interp_glue_mem m{mem, Read8, Read16, Read32, Write8, Write16, Write32, mem->strict_data_checks() ? CheckData : nullptr, {}, 0};
     // Direct ranges only for the real emulator memory (the verify check passes an overlay).
     if (mem->rawmem_limit() || mem->fast_base()) {
         for (int i = 0; i < g_nranges; ++i) m.ranges[i] = {g_ranges[i].base, g_ranges[i].size, g_ranges[i].host};

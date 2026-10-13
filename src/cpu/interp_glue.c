@@ -93,9 +93,15 @@ void cec_require_supervisor (SIM_CPU *cpu) { (void) cpu; if (glue_user_mode) bai
 
 void mmu_check_addr (SIM_CPU *cpu, bu32 addr, bool write, bool inst, int size)
 {
-  (void) cpu; (void) write; (void) inst;
   if (size > 1 && (addr & (size - 1)))
     bail ();
+  if (!inst && glue_mem->data_check)
+    {
+      uint32_t flags = (write ? 1u << 16 : 0) | (!glue_user_mode ? 1u << 17 : 0)
+        | (BFIN_CPU_STATE.multi_pc == PCREG + 6 ? 1u << 18 : 0);
+      if (glue_mem->data_check (glue_mem->ctx, PCREG, addr, size, flags))
+        bail ();
+    }
 }
 void mmu_check_cache_addr (SIM_CPU *cpu, bu32 addr, bool write, bool inst)
 {

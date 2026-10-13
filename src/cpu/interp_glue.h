@@ -16,6 +16,8 @@ struct interp_glue_mem {
   void (*write8) (void *ctx, uint32_t addr, uint8_t v);
   void (*write16) (void *ctx, uint32_t addr, uint16_t v);
   void (*write32) (void *ctx, uint32_t addr, uint32_t v);
+  /* Probe without committing fault state; JIT raises any rejected access. */
+  int (*data_check) (void *ctx, uint32_t pc, uint32_t addr, uint32_t width, uint32_t flags);
   /* Plain memory reachable directly: guest [lo, lo + size) is host[0, size). */
   struct { uint32_t lo, size; uint8_t *host; } ranges[12];
   int n_ranges;
