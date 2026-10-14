@@ -22,6 +22,7 @@
 #include "usb.h"
 #include "sport.h"
 #include "interp.h"
+#include "memmodel.h"
 #include "emu.h"
 #ifdef ENABLE_PROFILING
 #include "profiling/profiler.h"
@@ -151,6 +152,7 @@ private:
 
 BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     pcProf_ = getenv("OP1EMU_PC_PROF") != nullptr;
+    if (const char* m = getenv("OP1EMU_MEMMODEL")) memModel_ = std::make_unique<MemModel>(m);
     if (const char* b = getenv("OP1EMU_BATCH")) batchCycles_ = std::max(1ull, strtoull(b, nullptr, 10));
     if (const char* b = getenv("OP1EMU_BATCH_AFTER")) batchAfterCycles_ = strtoull(b, nullptr, 10);
     panicLog_ = getenv("OP1_PANIC_LOG") != nullptr;
@@ -508,7 +510,12 @@ HaltReason BlackFinCpu::Run() {
         if (interpFirst_) {
             const u32 pc0 = cpuState_->pc;
             if (pc0 >= interpLo_ && pc0 < interpHi_ && interpVisits_[pc0]++ < interpFirst_) {
+                if (memModel_) {
+                    memModel_->BeginBlock(pc0, time_.Cycles());
+                    Interpreter::SetTrace(&MemModel::Trace, memModel_.get());
+                }
                 const uint32_t steps = Interpreter::Run(cpuState_.get(), bcoreMemory_.get(), cec_is_user_mode(), 256);
+                if (memModel_) Interpreter::SetTrace(nullptr, nullptr);
                 interpSteps_ += steps;
                 interpreted = steps != 0;
             }

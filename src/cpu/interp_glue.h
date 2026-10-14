@@ -21,6 +21,9 @@ struct interp_glue_mem {
   /* Plain memory reachable directly: guest [lo, lo + size) is host[0, size). */
   struct { uint32_t lo, size; uint8_t *host; } ranges[12];
   int n_ranges;
+  /* Optional: every data access (kind 0 read, 1 write) and instruction (2) the interpreter runs (memmodel.h). */
+  void (*trace) (void *tctx, uint32_t addr, uint32_t len, int kind);
+  void *tctx;
 };
 
 /* The registers one instruction can read or change; ASTAT as the architectural 32-bit word. */

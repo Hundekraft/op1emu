@@ -31,7 +31,9 @@ static int mmr_touched;
 unsigned
 sim_core_read_buffer (SIM_DESC sd, sim_cpu *cpu, unsigned map, void *buffer, address_word addr, unsigned len)
 {
-  (void) sd; (void) cpu; (void) map;
+  (void) sd; (void) cpu;
+  if (glue_mem->trace && map != exec_map)
+    glue_mem->trace (glue_mem->tctx, addr, len, 0);
   for (int r = 0; r < glue_mem->n_ranges; r++)
     if (addr - glue_mem->ranges[r].lo < glue_mem->ranges[r].size
         && len <= glue_mem->ranges[r].size - (addr - glue_mem->ranges[r].lo))
@@ -57,6 +59,8 @@ unsigned
 sim_core_write_buffer (SIM_DESC sd, sim_cpu *cpu, unsigned map, const void *buffer, address_word addr, unsigned len)
 {
   (void) sd; (void) cpu; (void) map;
+  if (glue_mem->trace)
+    glue_mem->trace (glue_mem->tctx, addr, len, 1);
   for (int r = 0; r < glue_mem->n_ranges; r++)
     if (addr - glue_mem->ranges[r].lo < glue_mem->ranges[r].size
         && len <= glue_mem->ranges[r].size - (addr - glue_mem->ranges[r].lo))
@@ -180,6 +184,8 @@ interp_glue_run (struct interp_glue_regs *regs, const struct interp_glue_mem *me
       /* IDLE needs op1emu's idle handling (wait for an interrupt): leave it to the JIT. */
       if (iw0 == 0x0020)
         break;
+      if (glue_mem->trace)
+        glue_mem->trace (glue_mem->tctx, pc, insn_length (iw0), 2);
       saved = sim_st;
       mmr_touched = 0;
       if (_setjmp (bail_env))

@@ -20,7 +20,11 @@ int CheckData(void* m, uint32_t pc, uint32_t a, uint32_t width, uint32_t flags) 
 namespace {
 Interpreter::Range g_ranges[12];
 int g_nranges = 0;
+Interpreter::TraceFn g_trace = nullptr;
+void* g_tctx = nullptr;
 }
+
+void Interpreter::SetTrace(TraceFn fn, void* ctx) { g_trace = fn; g_tctx = ctx; }
 
 bool Interpreter::Available() { return true; }
 
@@ -53,6 +57,8 @@ unsigned Interpreter::Run(CpuState* cpu, Memory* mem, bool userMode, unsigned ma
         for (int i = 0; i < g_nranges; ++i) m.ranges[i] = {g_ranges[i].base, g_ranges[i].size, g_ranges[i].host};
         m.n_ranges = g_nranges;
     }
+    m.trace = g_trace;
+    m.tctx = g_tctx;
     const unsigned steps = interp_glue_run(&r, &m, userMode ? 1 : 0, maxSteps);
     if (!steps) return 0;
 
@@ -78,5 +84,6 @@ unsigned Interpreter::Run(CpuState* cpu, Memory* mem, bool userMode, unsigned ma
 #else
 bool Interpreter::Available() { return false; }
 void Interpreter::SetDirectRanges(const Range*, int) {}
+void Interpreter::SetTrace(TraceFn, void*) {}
 unsigned Interpreter::Run(CpuState*, Memory*, bool, unsigned) { return 0; }
 #endif

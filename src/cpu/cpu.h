@@ -92,6 +92,7 @@ private:
     u32 verifyLo_ = 0, verifyHi_ = 0;
     uint64_t verifyOk_ = 0, verifyBad_ = 0;
     void VerifyAgainst(u32 pc, const CpuState& interp, const std::map<uint32_t, uint8_t>& writes);
+    std::unique_ptr<class MemModel> memModel_;   // OP1EMU_MEMMODEL (memmodel.h)
     uint32_t interpFirst_ = 0; u32 interpLo_ = 0, interpHi_ = 0xFFFFFFFF;
     std::unordered_map<u32, uint32_t> interpVisits_;
     uint64_t interpNs_ = 0, syncWaitNs_ = 0, syncWaitMaxNs_ = 0;

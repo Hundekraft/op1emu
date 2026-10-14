@@ -16,4 +16,7 @@ public:
     // Plain memory the interpreter may access directly (guest base, size, host pointer); see Emulator::PlainRange.
     struct Range { uint32_t base, size; uint8_t* host; };
     static void SetDirectRanges(const Range* ranges, int count);
+    // Called for every data access and instruction of the following Run()s (nullptr: off); see memmodel.h.
+    using TraceFn = void (*)(void* ctx, uint32_t addr, uint32_t len, int kind);
+    static void SetTrace(TraceFn fn, void* ctx);
 };
