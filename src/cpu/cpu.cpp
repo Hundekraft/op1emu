@@ -406,6 +406,11 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     // tier-0 blocks, 4 us each where LLVM took about 1 ms, the CPU thread's
     // compile time -47%, the same guest work.
     core_->set_copy_patch(true);
+    // OP1EMU_INTERP_VERIFY compares one pass of a block: no native loops or steady skips in the JIT's run.
+    if (verifyHi_) {
+        core_->set_loop_blocks(false);
+        core_->set_steady_skip(0);
+    }
 
     // Initialize bcore CEC and EVT
     bcore::cec_init();
@@ -610,7 +615,10 @@ HaltReason BlackFinCpu::Run() {
     inRun_ = true;
     const bool ran = interpreted || core_->run(cpuState_->pc);
     inRun_ = false;
-    if (verifySteps && !verifyMem->touchedMmr() && verifyState->pc == cpuState_->pc)
+    // The same stop: pc and instruction count (a block may end at a loop top that the interpreter reaches
+    // again after one iteration).
+    if (verifySteps && !verifyMem->touchedMmr() && verifyState->pc == cpuState_->pc &&
+        verifySteps == cpuState_->packets + cpuState_->chain_packets)
         VerifyAgainst(verifyPc, *verifyState, verifyMem->writes());
     if (!ran) {
         // Translation/JIT failure: PC is unchanged, so retrying would loop
@@ -944,9 +952,9 @@ void BlackFinCpu::SetChaining(bool chaining, bool dry) {
     core_->set_chaining(chaining, dry);
 }
 
-void BlackFinCpu::SetLoopBlocks(bool loop) { core_->set_loop_blocks(loop); }
+void BlackFinCpu::SetLoopBlocks(bool loop) { core_->set_loop_blocks(loop && !verifyHi_); }
 
-void BlackFinCpu::SetSteadySkip(int mode) { core_->set_steady_skip(mode); }
+void BlackFinCpu::SetSteadySkip(int mode) { core_->set_steady_skip(verifyHi_ ? 0 : mode); }
 
 void BlackFinCpu::SetTiering(uint32_t threshold, uint32_t sizeRef) { core_->set_tiering(threshold, sizeRef); }
 
