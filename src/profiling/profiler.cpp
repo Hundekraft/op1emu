@@ -1,3 +1,4 @@
+#include <pthread.h>
 #include "profiler.h"
 
 #include "cpu/cpu.h"
@@ -470,7 +471,13 @@ struct Profiler::Impl : BcoreEventSink {
 
     void Start(uint32_t pc) {
         started = true;
+#ifdef __APPLE__
+        uint64_t tid = 0;
+        pthread_threadid_np(nullptr, &tid);
+        cpuTid = static_cast<long>(tid);
+#else
         cpuTid = static_cast<long>(gettid());
+#endif
         if (service) service->cpuThread.store(std::this_thread::get_id(), std::memory_order_relaxed);
         if (options.counters) {
             std::string error;

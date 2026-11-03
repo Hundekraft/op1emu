@@ -1,5 +1,7 @@
 #include "hw_counters.h"
 
+#ifdef __linux__
+
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -79,3 +81,16 @@ bool HwCounters::Read(Values& values) const {
     values.cycles = data[4];
     return true;
 }
+
+#else  // !__linux__: no perf_event_open; --profile-counters reports that instead of counting nothing
+
+HwCounters::~HwCounters() = default;
+
+bool HwCounters::Open(std::string& error) {
+    error = "hardware counters need Linux (perf_event_open)";
+    return false;
+}
+
+bool HwCounters::Read(Values&) const { return false; }
+
+#endif

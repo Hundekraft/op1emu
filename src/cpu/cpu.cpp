@@ -1090,6 +1090,10 @@ static std::string Demangled(const std::type_info& type) {
 // Base classes depth first, nearest first: the order a lookup of an inherited
 // member searches them in when only one base declares it.
 static void AddBases(const std::type_info& type, std::vector<std::string>& out) {
+#if !defined(__GLIBCXX__)
+    // libc++abi (macOS) does not publish its class_type_info layouts: no bases there.
+    (void)type; (void)out;
+#else
     if (auto* single = dynamic_cast<const abi::__si_class_type_info*>(&type)) {
         out.push_back(Demangled(*single->__base_type));
         AddBases(*single->__base_type, out);
@@ -1100,6 +1104,7 @@ static void AddBases(const std::type_info& type, std::vector<std::string>& out) 
             AddBases(base, out);
         }
     }
+#endif
 }
 
 profiling::ServiceStats& BlackFinCpu::EnableServiceStats() {

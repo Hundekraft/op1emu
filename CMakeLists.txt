@@ -147,12 +147,15 @@ find_package(Threads REQUIRED)
 # Measurement build (docs/profiling.md). OFF compiles every profiling hook out
 # of the emulator and of bcore, so a normal build carries none of it.
 option(ENABLE_PROFILING "Build the profiling hooks: phase marks, trace, census, perf/jitdump" OFF)
-if(ENABLE_PROFILING AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # perf_event_open, gettid and the perf JIT listener are Linux's.
-    message(FATAL_ERROR "ENABLE_PROFILING needs a Linux host")
+# perf_event_open, gettid and the perf JIT listener are Linux's: elsewhere (macOS) the marks, trace, census and
+# checksums build, without perf control, jitdump or hardware counters.
+if(ENABLE_PROFILING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(OP1_PERF ON)
+else()
+    set(OP1_PERF OFF)
 endif()
 set(BCORE_ENABLE_PROFILE ${ENABLE_PROFILING} CACHE BOOL "bcore observability API (follows ENABLE_PROFILING)" FORCE)
-set(BCORE_PERF_JIT_EVENTS ${ENABLE_PROFILING} CACHE BOOL "bcore jitdump support (follows ENABLE_PROFILING)" FORCE)
+set(BCORE_PERF_JIT_EVENTS ${OP1_PERF} CACHE BOOL "bcore jitdump support (follows ENABLE_PROFILING, Linux)" FORCE)
 if(ENABLE_PROFILING)
     # perf call graphs through host code need frame pointers, and every
     # caller's frame: a tail call (RTC::ProcessWithInterrupt ends in a jump
