@@ -28,12 +28,34 @@ HeadlessFrontend::HeadlessFrontend(const std::string& configPath, int inputFd) {
             throw std::runtime_error("Invalid GPIO for key: " + name);
         keys_.emplace(name, Pin{bank, index});
     }
+    if (json.contains("encoders")) {
+        for (const auto& [name, enc] : json.at("encoders").items()) {
+            const auto& cw = enc.at("clockwise_gpio");
+            const auto& ccw = enc.at("counter_clockwise_gpio");
+            encoders_[name] = Encoder{{cw.at(0).get<int>(), cw.at(1).get<int>()}, {ccw.at(0).get<int>(), ccw.at(1).get<int>()}};
+            wheelIndex_[name] = wheelQueue_.Add({cw.at(0).get<int>(), cw.at(1).get<int>(), ccw.at(0).get<int>(), ccw.at(1).get<int>()});
+        }
+    }
     inputFd_ = dup(inputFd);
     if (inputFd_ < 0) throw std::runtime_error("Failed to open headless input");
 }
 
 HeadlessFrontend::~HeadlessFrontend() {
     if (inputFd_ >= 0) close(inputFd_);
+}
+
+void HeadlessFrontend::ReplaceInput(int fd) {
+    int copy = dup(fd);
+    if (copy < 0) throw std::runtime_error("Failed to open headless input");
+    if (inputFd_ >= 0) close(inputFd_);
+    inputFd_ = copy;
+    pending_.clear();
+    eof_ = false;
+    resumeAt_ = {};
+    releaseAtResume_.reset();
+    releaseAtFrame_.reset();
+    frameTarget_.reset();
+    audioTarget_.reset();
 }
 
 bool HeadlessFrontend::ReadLine(std::string& line) {
@@ -108,7 +130,54 @@ void HeadlessFrontend::Initialize(int width, int height) {
     started_ = false;
 }
 
+void HeadlessFrontend::ArmGate(uint64_t frame) {   // also lets a CPU held at the previous gate run on to this one
+    if (!lockstep_) return;
+    std::lock_guard<std::mutex> lock(gateMutex_);
+    gateFrame_.store(frame);
+    audioGate_.store(0);           // one gate at a time: a frame wait releases a CPU held at an audio position
+    gateCv_.notify_all();
+}
+
+void HeadlessFrontend::ArmAudioGate(uint64_t frames) {
+    if (!lockstep_) return;
+    std::lock_guard<std::mutex> lock(gateMutex_);
+    audioGate_.store(frames);
+    gateFrame_.store(0);
+    gateCv_.notify_all();
+}
+
+void HeadlessFrontend::OnAudioDelivered(uint64_t delivered) {   // CPU thread
+    delivered_.store(delivered);
+    const uint64_t g = audioGate_.load();
+    if (!g || delivered < g) return;
+    std::unique_lock<std::mutex> lock(gateMutex_);
+    if (audioGate_.load() != g) return;
+    audioHeld_.store(true);
+    gateCv_.wait(lock, [&] { return audioGate_.load() != g; });
+    audioHeld_.store(false);
+}
+
+void HeadlessFrontend::OpenGate() {
+    std::lock_guard<std::mutex> lock(gateMutex_);
+    gateFrame_.store(0);
+    audioGate_.store(0);
+    gateHeld_.store(false);
+    gateCv_.notify_all();
+}
+
+void HeadlessFrontend::WaitAtGate() {           // CPU thread, no frame lock held
+    const uint64_t g = gateFrame_.load();
+    if (!g || frameCount_.load() < g) return;
+    std::unique_lock<std::mutex> lock(gateMutex_);
+    if (gateFrame_.load() != g) return;
+    gateHeld_.store(true);
+    gateCv_.wait(lock, [&] { return gateFrame_.load() != g; });
+    gateHeld_.store(false);
+}
+
 void HeadlessFrontend::UpdateRowBuffer(int x, int y, const void* data, int length) {
+    bool done = false;
+    {
     std::lock_guard<std::mutex> lock(frameMutex_);
     if (!data || length <= 0 || length % 2 || x < 0 || y < 0 || y >= height_ ||
         x >= width_ || length / 2 > width_ - x)
@@ -133,7 +202,10 @@ void HeadlessFrontend::UpdateRowBuffer(int x, int y, const void* data, int lengt
         latest_ = work_;
         started_ = false;
         frameCount_.fetch_add(1, std::memory_order_acq_rel);
+        done = true;
     }
+    }
+    if (done) WaitAtGate();
 }
 
 // The device scans the panel portrait (width x height); GLFWDisplay draws it
@@ -174,6 +246,7 @@ void HeadlessFrontend::Execute(const std::string& line, Clock::time_point now) {
     for (std::string word; stream >> word;) args.push_back(word);
     if (args.empty() || args[0][0] == '#') return;
     const auto& command = args[0];
+    if (commandHook_ && commandHook_(args)) return;
     if (command == "quit" && args.size() == 1) {
         shouldClose_ = true;
     } else if (command == "keys" && args.size() == 1) {
@@ -186,6 +259,17 @@ void HeadlessFrontend::Execute(const std::string& line, Clock::time_point now) {
         int timeout = args.size() == 3 ? Duration(args[2]) : 600000;
         frameTarget_ = FrameCount() + static_cast<uint64_t>(frames);
         frameDeadline_ = now + std::chrono::milliseconds(timeout);
+        ArmGate(*frameTarget_);
+    } else if (command == "audio-anchor" && args.size() == 1) {
+        audioBase_ = AudioDelivered();
+    } else if (command == "wait-audio" && (args.size() == 2 || args.size() == 3)) {
+        // wait-audio N|@N [TIMEOUT_MS]: commands after it run once SPORT0 has delivered N TX frames (absolute,
+        // or @N counted from the last audio-anchor)
+        const bool rel = args[1][0] == '@';
+        audioTarget_ = (rel ? audioBase_ : 0) +
+            static_cast<uint64_t>(Integer(rel ? args[1].substr(1) : args[1], 1, 999999999999999L, "Audio frame"));
+        audioDeadline_ = now + std::chrono::milliseconds(args.size() == 3 ? Duration(args[2]) : 600000);
+        ArmAudioGate(*audioTarget_);
     } else if (command == "screenshot" && args.size() == 2) {
         WriteScreenshot(args[1]);
     } else if (command == "accel" && args.size() == 2 && args[1] == "random") {
@@ -226,19 +310,73 @@ void HeadlessFrontend::Execute(const std::string& line, Clock::time_point now) {
             releaseAtResume_ = key->second;
             resumeAt_ = now + std::chrono::milliseconds(duration);
         }
+    } else if (command == "hold" && args.size() == 3) {
+        // hold KEY FRAMES: press, release after FRAMES guest display frames (guest time, unlike tap).
+        auto key = keys_.find(args[1]);
+        if (key == keys_.end()) throw std::runtime_error("Unknown key: " + args[1]);
+        const long frames = Integer(args[2], 1, 100000, "Frame count");
+        OnKeyPressed(key->second.first, key->second.second);
+        releaseAtFrame_ = key->second;
+        frameTarget_ = FrameCount() + static_cast<uint64_t>(frames);
+        frameDeadline_ = now + std::chrono::minutes(10);
+        ArmGate(*frameTarget_);
+        LogInfo("Headless input queued: hold %s %ld frames", args[1].c_str(), frames);
+    } else if (command == "turn" && args.size() >= 3 && args.size() <= 5 && (args[2] == "cw" || args[2] == "ccw")) {
+        // turn ENC cw|ccw [N [FRAMES]]: N quadrature edges (default 4 = one cycle), one every FRAMES guest display
+        // frames (default 2, ~33 ms of guest time). Paced by guest frames, not host time: the firmware samples the
+        // encoders from a thread, and edges closer together than that in guest time get lost when the guest runs
+        // slower than the host. The engine browser moves one item per 8 edges on enc1 (blue).
+        auto enc = encoders_.find(args[1]);
+        if (enc == encoders_.end()) throw std::runtime_error("Unknown encoder: " + args[1]);
+        const long n = args.size() >= 4 ? Integer(args[3], 1, 1000, "Edge count") : 4;
+        turning_ = &enc->second;
+        turnSteps_ = static_cast<int>(args[2] == "cw" ? n : -n);
+        turnFrames_ = args.size() == 5 ? static_cast<int>(Integer(args[4], 1, 100, "Frames per edge")) : 2;
+        turnNextFrame_ = 0;
+    } else if (command == "wheel" && args.size() == 3) {
+        // wheel ENC NOTCHES: as the mouse wheel over that encoder in the GUI (EncoderQueue, host-time pacing).
+        auto it = wheelIndex_.find(args[1]);
+        if (it == wheelIndex_.end()) throw std::runtime_error("Unknown encoder: " + args[1]);
+        wheelQueue_.Wheel(it->second, std::stod(args[2]));
     } else {
         throw std::runtime_error("Invalid headless command: " + line);
     }
 }
 
 void HeadlessFrontend::PollEvents(Clock::time_point now) {
+    wheelQueue_.Pump(std::chrono::duration<double>(now.time_since_epoch()).count(), [this](int bank, int index, bool pressed) {
+        if (pressed) OnKeyPressed(bank, index); else OnKeyReleased(bank, index);
+    });
+    if (!wheelQueue_.Idle()) return;   // later commands wait until the wheel edges are out
     if (now < resumeAt_ || shouldClose_) return;
+    if (turning_ && turnSteps_) {
+        const uint64_t frame = FrameCount();
+        if (frame < turnNextFrame_) return;
+        static constexpr int kSeq[] = {0, 2, 3, 1};  // same Gray sequence as the GUI (bit 1 = cw pin, bit 0 = ccw pin)
+        Encoder& e = *turning_;
+        e.phase = (e.phase + (turnSteps_ > 0 ? 1 : 3)) % 4;
+        turnSteps_ += turnSteps_ > 0 ? -1 : 1;
+        const int v = kSeq[e.phase];
+        if (v & 2) OnKeyPressed(e.cw.first, e.cw.second); else OnKeyReleased(e.cw.first, e.cw.second);
+        if (v & 1) OnKeyPressed(e.ccw.first, e.ccw.second); else OnKeyReleased(e.ccw.first, e.ccw.second);
+        turnNextFrame_ = frame + static_cast<uint64_t>(turnFrames_);
+        if (!turnSteps_) { turning_ = nullptr; frameTarget_ = turnNextFrame_; frameDeadline_ = now + std::chrono::minutes(10); }
+        ArmGate(turnNextFrame_);
+        return;
+    }
     if (releaseAtResume_) {
         OnKeyReleased(releaseAtResume_->first, releaseAtResume_->second);
         releaseAtResume_.reset();
         // Give the CPU an opportunity to observe this edge before a following
         // command (especially another tap of the same key or quit).
         return;
+    }
+    if (audioTarget_) {
+        if (AudioDelivered() < *audioTarget_) {
+            if (now >= audioDeadline_) throw std::runtime_error("Timed out waiting for audio");
+            return;
+        }
+        audioTarget_.reset();
     }
     if (frameTarget_) {
         if (FrameCount() < *frameTarget_) {
@@ -247,12 +385,22 @@ void HeadlessFrontend::PollEvents(Clock::time_point now) {
             return;
         }
         frameTarget_.reset();
+        if (releaseAtFrame_) {
+            OnKeyReleased(releaseAtFrame_->first, releaseAtFrame_->second);
+            releaseAtFrame_.reset();
+            return;
+        }
     }
     // Bound work per tick even for an endless stream of commands/comments.
     for (int budget = 0; budget < 64; ++budget) {
         std::string line;
         if (!ReadLine(line)) break;
         Execute(line, now);
-        if (now < resumeAt_ || shouldClose_ || frameTarget_) break;
+        if (now < resumeAt_ || shouldClose_ || frameTarget_ || turning_ || audioTarget_) break;
     }
+    // Lockstep: a CPU held at a reached frame goes on once no frame-based wait is pending (host-time waits,
+    // idle input); a new frame wait moved the gate already (ArmGate).
+    if (lockstep_ && !frameTarget_ && !turning_ && !audioTarget_ &&
+        ((gateFrame_.load() && FrameCount() >= gateFrame_.load()) ||
+         (audioGate_.load() && AudioDelivered() >= audioGate_.load()))) OpenGate();
 }
