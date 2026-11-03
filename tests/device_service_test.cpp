@@ -951,7 +951,7 @@ static void SportTransmitDeliversTheBuffer(u32 modify) {
 // The OP-1's codec link: SPORT0 with the secondary channels on (TXSE, RXSE),
 // 32-bit words, no stereo frame sync. A frame is a primary word and a
 // secondary word, interleaved in memory, at the codec's 44.1 kHz: one second
-// of guest time moves 44100 two-word frames each way, and the sink gets the
+// of guest time moves SPORT::DefaultRateHz() (22050 or OP1EMU_SPORT_HZ) two-word frames each way, and the sink gets the
 // buffer's words in order, two to a frame.
 static void SportSecondaryChannelsFrameTwoWords() {
     AudioRig rig;
@@ -989,9 +989,10 @@ static void SportSecondaryChannelsFrameTwoWords() {
     }
     // A service moves the frames due up to the buffer's end, the rest come at
     // the next: at most one buffer (64 frames) of the second is still to go.
-    auto aSecond = [](uint64_t frames) { return frames <= 44100 && frames + 64 >= 44100; };
-    Require(aSecond(heard), "transmit: 44100 frames in a second, not " + std::to_string(heard));
-    Require(aSecond(taken), "receive: 44100 frames in a second, not " + std::to_string(taken));
+    const uint64_t rate = SPORT::DefaultRateHz();
+    auto aSecond = [rate](uint64_t frames) { return frames <= rate && frames + 64 >= rate; };
+    Require(aSecond(heard), "transmit: " + std::to_string(rate) + " frames in a second, not " + std::to_string(heard));
+    Require(aSecond(taken), "receive: " + std::to_string(rate) + " frames in a second, not " + std::to_string(taken));
     for (size_t i = 0; i < words.size(); ++i)
         Require(words[i] == rig.ram.Read32(0x1000 + u32(i % 128) * 4), "the sink hears the buffer's words in order");
 }
@@ -1006,10 +1007,10 @@ static void SportReceiveWithoutInputIsSilence() {
     sport.Write32(0x20, 1);         // RSPEN
     uint32_t buffer[64];
     Require(sport.DMARead(0, 0, buffer, sizeof buffer) == 0, "the first transfer only starts the clock");
-    time.Retire(TimeSource::kHz / 1000);
+    time.Retire(TimeSource::kHz / 500);   // 2 ms: 32 frames are due at 22050 frames/s as at 44100
     std::fill(std::begin(buffer), std::end(buffer), 0xDEADBEEFu);
     const u32 moved = sport.DMARead(0, 0, buffer, sizeof buffer);
-    Require(moved == sizeof buffer, "a millisecond has a buffer's worth of frames due");
+    Require(moved == sizeof buffer, "two milliseconds have a buffer's worth of frames due");
     for (uint32_t word : buffer) Require(word == 0, "a received word is silence");
 }
 
