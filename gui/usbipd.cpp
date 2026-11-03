@@ -45,6 +45,7 @@ void USBIPServer::Rebind(USBDevice* d)
 {
     {
         std::lock_guard devLock(deviceMutex);
+        if (device) device->SetHostConnected(false);
         device = d;
     }
     // ep0Claimed clears itself: the new device's control endpoint is idle.
@@ -123,7 +124,7 @@ void USBIPServer::Detach(uvw::tcp_handle& client)
     }
     // Its pending transfers would take the next client's data (outside our lock: the USB's comes first).
     std::lock_guard devLock(deviceMutex);
-    if (device) device->CancelPending();
+    if (device) { device->CancelPending(); device->SetHostConnected(false); }
 }
 
 void USBIPServer::Close(uvw::tcp_handle& client)
@@ -469,10 +470,23 @@ void USBIPServer::HandleURBRequest(USBIP_CMD_SUBMIT& req, uint8_t* data, std::si
         for (int i = 0; i < req.number_of_packets; i++) {
             isoc[i] = *((USBIP_ISOC_DESC*)data + i);
         }
-        device->HandleDataRead(req.ep, req.interval, req.transfer_buffer_length, [req=req, isoc=isoc, &client, conn, this] (const uint8_t* data, std::size_t length) {
-            FillIsocDesc(const_cast<USBIP_ISOC_DESC*>(isoc.data()), req.number_of_packets, length);
-            Reply(client, conn, req, data, length, isoc.data());
-        });
+        if (req.number_of_packets) {
+            std::vector<u32> limits;
+            for (const auto& packet : isoc) limits.push_back(packet.length);
+            device->HandleIsoRead(req.ep, req.interval, limits,
+                [req=req, isoc=isoc, &client, conn, this](const std::vector<u8>& data, const std::vector<u32>& lengths) mutable {
+                    for (std::size_t i = 0; i < lengths.size(); ++i) {
+                        isoc[i].actual_length = lengths[i];
+                        isoc[i].status = 0;
+                    }
+                    Reply(client, conn, req, data.data(), data.size(), isoc.data());
+                });
+        } else {
+            device->HandleDataRead(req.ep, req.interval, req.transfer_buffer_length,
+                [req=req, &client, conn, this](const uint8_t* data, std::size_t length) {
+                    Reply(client, conn, req, data, length, nullptr);
+                });
+        }
     } else { // Host to Device
         std::vector<USBIP_ISOC_DESC> isoc(req.number_of_packets);
         for (int i = 0; i < req.number_of_packets; i++) {
@@ -532,7 +546,13 @@ void USBIPServer::Parse(uvw::tcp_handle& client, Session& session)
                 OP_REQ_IMPORT req;
                 buffer.pop(&req, sizeof(req));
                 LogInfo("USBIP: attach device");
-                state = ReplyImport(req, client) ? USBIPState::WaitHeader : USBIPState::WaitCommand;
+                if (ReplyImport(req, client)) {
+                    std::lock_guard devLock(deviceMutex);
+                    if (device) device->SetHostConnected(true);
+                    state = USBIPState::WaitHeader;
+                } else {
+                    state = USBIPState::WaitCommand;
+                }
             }
         } else if (state == USBIPState::WaitHeader) {
             if (buffer.size() >= sizeof(USBIP_HEADER_BASIC)) {
