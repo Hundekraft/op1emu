@@ -16,6 +16,13 @@ constexpr std::size_t FIFO_SIZE = 8; // 8x16-bit words or 4x32-bit words
 
 SPORT::SPORT(u32 baseAddr, int sportNum, const TimeSource& time)
     : RegisterDevice("SPORT" + std::to_string(sportNum), baseAddr, 0x60), sportNumber(sportNum), time_(time) {
+    // OP1EMU_SPORT_HZ: another frame rate (our fork ran SPORT0 at 22050 two-word frames/s; see
+    // OP1-Emulator docs/upstream-sync-2026-11.md, "SPORT0 rate").
+    if (const char* hz = std::getenv("OP1EMU_SPORT_HZ")) {
+        const long v = std::strtol(hz, nullptr, 10);
+        if (v >= 8000 && v <= 192000) sampleRateHz_ = static_cast<uint32_t>(v);
+        if (sportNum == 0) LogInfo("SPORT frame rate %u Hz (OP1EMU_SPORT_HZ)", sampleRateHz_);
+    }
 
     REG32(SPORT_TCR1, 0x00);
     FIELD(SPORT_TCR1, TSPEN, 0, 1, R(transmitEnabled), W(transmitEnabled));
@@ -214,8 +221,8 @@ u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
         dmaTxStartNs_ = time_.Nanoseconds();
         totalTxSamplesDelivered_ = 0;
         dmaTxActive_ = true;
-        LogInfo("SPORT%d TX DMA start: wordlen=%d stereo=%d secondary=%d", sportNumber, transmitWordLength,
-                transmitStereoFrameSync, transmitSecondaryEnabled);
+        LogInfo("SPORT%d TX DMA start: wordlen=%d stereo=%d secondary=%d, %u bytes asked = %zu frames", sportNumber,
+                transmitWordLength, transmitStereoFrameSync, transmitSecondaryEnabled, length, requestedSamples);
         if (!dump_) OpenDump();
     }
 
