@@ -12,6 +12,7 @@
 #include "interp.h"
 #include "memmodel.h"
 #include <map>
+#include "trace.h"
 #include "otp.h"
 #include "gptimer.h"
 #include "dma.h"
@@ -434,6 +435,20 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
         core_->set_loop_blocks(false);
         core_->set_steady_skip(0);
     }
+    // OP1EMU_TRACE_DIR (trace.h): one block per run, exact packet counts and packet state at every access, so
+    // no chaining, loop blocks, steady skip, copy-and-patch or lazy packet state while it traces.
+    tracer_.reset(Tracer::Create([this](uint32_t at) {
+        auto [text, next] = core_->disassemble(at);
+        return std::make_pair(text, next);
+    }));
+    if (tracer_) {
+        bcoreMemory_->SetTracer(tracer_.get(), cpuState_.get());
+        core_->set_lazy_state(false);
+        core_->set_copy_patch(false);
+        core_->set_loop_blocks(false);
+        core_->set_steady_skip(0);
+        LogInfo("OP1EMU_TRACE_DIR: tracing (no chaining, loop blocks, steady skip or copy-and-patch)");
+    }
 
     // Initialize bcore CEC and EVT
     bcore::cec_init();
@@ -473,6 +488,7 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
 }
 
 BlackFinCpu::~BlackFinCpu() {
+    if (tracer_) tracer_->Finish();
 }
 
 void BlackFinCpu::ProcessInterrupt(int pin, int level) {
@@ -590,6 +606,7 @@ HaltReason BlackFinCpu::Run() {
     if (profiler_) profiler_->BeforeRun(blockPc);
 #endif
     if (panicLog_ || !breakPcs_.empty()) DebugBeforeRun();
+    if (tracer_) { tracer_->Poll(cpuState_->pc); tracer_->BeginBlock(cpuState_->pc, cyclesElapsed); }
     // Hit entry point, invalidating core to reset cached translations
     if (cpuState_->pc == 0xFFA00000) {
         ApplyOverlay();
@@ -659,6 +676,10 @@ HaltReason BlackFinCpu::Run() {
     // (TimeSource::SetBlockPackets, SetChainedPackets).
     const uint32_t packets = cpuState_->chain_packets + cpuState_->packets;
     const uint32_t chained = cpuState_->chain_blocks;
+    if (tracer_) {
+        tracer_->EndBlock(packets, cpuState_->pc);
+        tracer_->CheckIpend(bcore::cec_mmr_read(cpuState_.get(), bcore::CEC_MMR_BASE + 4 * bcore::CEC_IDX_IPEND), cpuState_->pc);
+    }
     cpuState_->packets = 0;
     cpuState_->chain_packets = 0;
     cpuState_->chain_blocks = 0;
@@ -734,6 +755,7 @@ void BlackFinCpu::HostWork(bool would) {
     if (*cpuState_->cec_pending) ++hostWork_[kWorkCec];
 #endif
     bcore::cec_check_pending(cpuState_.get());
+    if (tracer_) tracer_->CheckIpend(bcore::cec_mmr_read(cpuState_.get(), bcore::CEC_MMR_BASE + 4 * bcore::CEC_IDX_IPEND), cpuState_->pc);
 }
 
 // Before a run: how many packets it may retire before the host has work
@@ -971,6 +993,7 @@ bool BlackFinCpu::OffThreadWork() {
 
 void BlackFinCpu::SetChaining(bool chaining, bool dry) {
     if (chaining && (interpFirst_ || verifyHi_)) chaining = false;   // they look at every block start
+    if (chaining && tracer_) chaining = false;
     if (chaining && (panicLog_ || !breakPcs_.empty())) {
         LogInfo("OP1EMU_BREAK / OP1_PANIC_LOG: blocks return to the host after each one (no chaining)");
         chaining = false;
@@ -979,15 +1002,15 @@ void BlackFinCpu::SetChaining(bool chaining, bool dry) {
     core_->set_chaining(chaining, dry);
 }
 
-void BlackFinCpu::SetLoopBlocks(bool loop) { core_->set_loop_blocks(loop && !verifyHi_); }
+void BlackFinCpu::SetLoopBlocks(bool loop) { core_->set_loop_blocks(loop && !verifyHi_ && !tracer_); }
 
-void BlackFinCpu::SetSteadySkip(int mode) { core_->set_steady_skip(verifyHi_ ? 0 : mode); }
+void BlackFinCpu::SetSteadySkip(int mode) { core_->set_steady_skip(verifyHi_ || tracer_ ? 0 : mode); }
 
 void BlackFinCpu::SetTiering(uint32_t threshold, uint32_t sizeRef) { core_->set_tiering(threshold, sizeRef); }
 
 void BlackFinCpu::SetLightTier1(bool light) { core_->set_light_tier1(light); }
 
-void BlackFinCpu::SetCopyPatch(bool enable) { core_->set_copy_patch(enable); }
+void BlackFinCpu::SetCopyPatch(bool enable) { core_->set_copy_patch(enable && !tracer_); }
 void BlackFinCpu::SetCopyPatchHints(bool enable) { core_->set_copy_patch_hints(enable); }
 
 bool BlackFinCpu::SetColdTier(uint32_t threshold, uint32_t batch, uint64_t age) {
@@ -1664,4 +1687,8 @@ void BlackFinCpu::VerifyAgainst(u32 at, const bcore::CpuState& in, const std::ma
     ++verifyBad_;
     static std::set<u32> seen;
     if (seen.insert(at).second) LogInfo("VERIFY mismatch block %#x:%s", at, diff.c_str());
+}
+
+void BlackFinCpu::TracePhase(const std::string& name) {
+    if (tracer_) tracer_->RequestPhase(name);
 }

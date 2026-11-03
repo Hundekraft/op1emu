@@ -516,6 +516,13 @@ static int RunEmulator(int argc, char* argv[]) {
         cpu->SetBootMode(0x0D); // Set BMODE to 0b1101, boot from NAND flash with port H
     };
     attachFrontends();
+    if (headless) {
+        // "trace NAME": through the CPU's event queue, so the phase starts in order with queued key events.
+        console->SetTraceHook([&](const std::string& name) {
+            BlackFinCpu* c = cpu;
+            c->QueueEvent([c, name] { c->TracePhase(name); });
+        });
+    }
     if (teBoot) BootKeys::HoldComForBoot(*cpu);
 
     auto loop = uvw::loop::get_default();

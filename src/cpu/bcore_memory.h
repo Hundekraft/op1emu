@@ -10,6 +10,9 @@
 class Profiler;
 namespace profiling { struct MemoryCensus; }
 
+class Tracer;
+namespace bcore { struct CpuState; }
+
 class EmulatorMemory : public bcore::Memory {
 public:
     explicit EmulatorMemory(Emulator& emulator);
@@ -30,6 +33,8 @@ public:
     void data_alignment_fault(uint32_t pc, uint32_t addr, uint32_t status) override;
     // OP1EMU_STRICT_MEMORY=1 (see the constructor).
     bool strict_data_checks() const override { return strictData_; }
+    // OP1EMU_TRACE_DIR: report MMR accesses (>= 0xFFC00000) with the current packet index. Not owned.
+    void SetTracer(Tracer* tracer, const bcore::CpuState* cpu) { tracer_ = tracer; traceCpu_ = cpu; }
     uint32_t check_data_access(uint32_t pc, uint32_t addr, uint32_t width, uint32_t flags, bool record = true) override;
     const uint8_t* raw() const override;
 
@@ -79,4 +84,7 @@ private:
     uint32_t dmemControl_ = 0, cplbAddress_[16]{}, cplbData_[16]{};
     std::set<uint32_t> unknownMmrs_;
     void refreshDataProtection();
+    Tracer* tracer_ = nullptr;
+    const bcore::CpuState* traceCpu_ = nullptr;
+    void TraceMmr(uint32_t addr, bool write, unsigned width, uint32_t value) const;
 };

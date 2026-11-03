@@ -43,6 +43,7 @@ class USB;
 class CoreTimer;
 class Watchdog;
 class MemModel;
+class Tracer;
 class GPIO;
 class PPI;
 class Display;
@@ -225,6 +226,8 @@ public:
     void AttachAudioOutput(const std::shared_ptr<AudioOutput>& audioOutput);
     void AttachAudioInput(const std::shared_ptr<AudioInput>& audioInput);
     void ReopenAudioDumps();    // fork-run: see SPORT::ReopenDump
+    // OP1EMU_TRACE_DIR tracing (src/cpu/trace.h): start a named phase; no-op when tracing is off. Any thread.
+    void TracePhase(const std::string& name);
     long AudioDumpBytes();      // sport0 dump size, see SPORT::DumpBytes
     uint64_t AudioDelivered();  // sport0 TX frames since DMA start
     void SetAcceleration(int16_t x, int16_t y, int16_t z);
@@ -278,6 +281,7 @@ protected:
     std::shared_ptr<SIC> sic;
     std::shared_ptr<CoreTimer> coreTimer;
     std::shared_ptr<Watchdog> watchdog_;
+    std::unique_ptr<Tracer> tracer_;
     std::atomic<bool> resetRequested_{false};
     bool tierBackground_ = false;
     uint64_t tierPublishAfter_ = 0;
