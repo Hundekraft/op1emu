@@ -3,6 +3,8 @@
 #include <utils/log.h>
 #include <cassert>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 
 // What usbip list shows. The guest's descriptors give the rest.
 static constexpr const char* kBusId = "1-1";
@@ -70,8 +72,11 @@ void USBIPServer::Start(unsigned int port)
         client->no_delay(true);
         client->read();
     });
-    server->bind("0.0.0.0", port);
-    server->listen();
+    // Loopback only: the guest's USB is not for the network (and two emulators on one host each take
+    // their own port, OP1EMU_USBIP_PORT in main.cpp).
+    if (server->bind("127.0.0.1", port) < 0 || server->listen() < 0)
+        throw std::runtime_error("Cannot bind USB/IP port " + std::to_string(port));
+    LogInfo("USB/IP listening on 127.0.0.1:%u", port);
 }
 
 unsigned int USBIPServer::Port() const

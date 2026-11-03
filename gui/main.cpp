@@ -102,6 +102,7 @@ static int RunEmulator(int argc, char* argv[]) {
     bool headless = false;
     bool teBoot = false;
     bool deterministic = false;
+    bool realtimeFlag = false;
     std::optional<long long> rtcEpoch;
     unsigned twiSpeedup = TWI::kDefaultSpeedup;
     unsigned mdmaSpeedup = DMA::kDefaultMdmaSpeedup;
@@ -149,6 +150,13 @@ static int RunEmulator(int argc, char* argv[]) {
         else if (options && arg == "--headless") headless = true;
         else if (options && arg == "--te-boot") teBoot = true;
         else if (options && arg == "--deterministic") deterministic = true;
+        // Older scripts' flags: guest time is paced to the host's clock by default now (--realtime was
+        // that), and blocks compile cheaply first instead of coming from a persistent cache.
+        else if (options && arg == "--realtime") realtimeFlag = true;
+        else if (options && arg == "--no-jit-cache") {}
+        else if (options && arg == "--jit-cache") {
+            if (++i == argc || !*argv[i]) throw std::runtime_error("--jit-cache requires a directory");
+        }
         else if (options && arg == "--no-chain") noChain = true;
         else if (options && arg == "--no-loop-blocks") noLoopBlocks = true;
         else if (options && arg == "--no-idle-wait") noIdleWait = true;
@@ -264,6 +272,8 @@ static int RunEmulator(int argc, char* argv[]) {
                      "  --input-script PATH   Read headless commands from PATH instead of stdin\n"
                      "  --deterministic       Run as fast as the host allows, not at the device's\n"
                      "                        pace: repeatable runs, for measurement and tests\n"
+                     "  --realtime, --jit-cache DIR, --no-jit-cache  Accepted for older scripts;\n"
+                     "                        no effect (pacing is the default, no JIT cache)\n"
                      "  --rtc-epoch SECONDS   RTC time at boot (default: the host's; 2024-01-01\n"
                      "                        with --deterministic)\n"
                      "  --no-chain            Return to the host after every guest block\n"
@@ -334,6 +344,8 @@ static int RunEmulator(int argc, char* argv[]) {
         return help ? 0 : 1;
     }
     if (positional.size() > 2) throw std::runtime_error("Expected NAND and optional LDR paths");
+    if (realtimeFlag && deterministic)
+        throw std::runtime_error("--realtime (paced, the default) and --deterministic (unpaced) contradict");
     if (!inputScript.empty() && !headless)
         throw std::runtime_error("--input-script requires --headless");
 #ifndef ENABLE_PROFILING
@@ -450,7 +462,16 @@ static int RunEmulator(int argc, char* argv[]) {
     auto loop = uvw::loop::get_default();
     // Its handles are made before the loop runs them, on its thread.
     USBIPServer usbipd(*loop, cpu.GetUSB());
-    usbipd.Start();
+    // OP1EMU_USBIP_PORT: another port than 3240, so that regression runs can each have their own.
+    unsigned usbipPort = USBIPServer::kDefaultPort;
+    if (const char* value = std::getenv("OP1EMU_USBIP_PORT")) {
+        char* end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (!*value || *end || parsed < 1 || parsed > 65535)
+            throw std::runtime_error("OP1EMU_USBIP_PORT must be 1..65535");
+        usbipPort = static_cast<unsigned>(parsed);
+    }
+    usbipd.Start(usbipPort);
     std::thread uvloop([loop]() {
         while (true) {
             loop->run();
