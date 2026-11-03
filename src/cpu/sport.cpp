@@ -6,6 +6,20 @@
 #include <cstring>
 #include <string>
 
+uint32_t SPORT::DefaultRateHz() {
+    static const uint32_t rate = [] {
+        uint32_t hz = 22050;
+        if (const char* v = std::getenv("OP1EMU_SPORT_HZ")) {
+            const long parsed = std::strtol(v, nullptr, 10);
+            if (parsed >= 8000 && parsed <= 192000) hz = static_cast<uint32_t>(parsed);
+            else LogError("OP1EMU_SPORT_HZ must be 8000..192000: %s", v);
+        }
+        LogInfo("SPORT frame rate %u Hz", hz);
+        return hz;
+    }();
+    return rate;
+}
+
 enum DataFormat {
     NORMAL = 0,
     COMPANDING_U_LAW = 2,
@@ -16,13 +30,6 @@ constexpr std::size_t FIFO_SIZE = 8; // 8x16-bit words or 4x32-bit words
 
 SPORT::SPORT(u32 baseAddr, int sportNum, const TimeSource& time)
     : RegisterDevice("SPORT" + std::to_string(sportNum), baseAddr, 0x60), sportNumber(sportNum), time_(time) {
-    // OP1EMU_SPORT_HZ: another frame rate (our fork ran SPORT0 at 22050 two-word frames/s; see
-    // OP1-Emulator docs/upstream-sync-2026-11.md, "SPORT0 rate").
-    if (const char* hz = std::getenv("OP1EMU_SPORT_HZ")) {
-        const long v = std::strtol(hz, nullptr, 10);
-        if (v >= 8000 && v <= 192000) sampleRateHz_ = static_cast<uint32_t>(v);
-        if (sportNum == 0) LogInfo("SPORT frame rate %u Hz (OP1EMU_SPORT_HZ)", sampleRateHz_);
-    }
 
     REG32(SPORT_TCR1, 0x00);
     FIELD(SPORT_TCR1, TSPEN, 0, 1, R(transmitEnabled), W(transmitEnabled));

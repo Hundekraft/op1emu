@@ -495,11 +495,11 @@ static int RunEmulator(int argc, char* argv[]) {
     // of silence.
     std::shared_ptr<TestAudioInput> audioInput;
     if (const char* setting = std::getenv("OP1EMU_TEST_INPUT_HZ")) {
-        constexpr unsigned kRate = 44100;   // SPORT0's frame rate
+        const unsigned kRate = SPORT::DefaultRateHz();
         char* end = nullptr;
         const long hz = std::strtol(setting, &end, 10);
         if (end == setting || *end || hz < 1 || hz > kRate / 2)
-            throw std::invalid_argument("OP1EMU_TEST_INPUT_HZ must be 1..22050");
+            throw std::invalid_argument("OP1EMU_TEST_INPUT_HZ must be 1..half the SPORT frame rate");
         audioInput = std::make_shared<TestAudioInput>(static_cast<unsigned>(hz), kRate);
         LogInfo("Diagnostic SPORT0 input: %ld Hz square wave, quarter scale", hz);
     }

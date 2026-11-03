@@ -46,6 +46,12 @@ public:
     uint64_t TxDelivered() const { return totalTxSamplesDelivered_; }
     static inline std::function<void(uint64_t)> txHook;
 
+    // The frame rate: 22050 two-word frames/s, as our fork has always run SPORT0, until a device measurement
+    // settles it against upstream's 44100 (OP1-Emulator docs/upstream-sync-2026-11.md, "SPORT0 rate");
+    // OP1EMU_SPORT_HZ picks another (44100 is upstream's).
+    static uint32_t DefaultRateHz();
+    uint32_t RateHz() const { return sampleRateHz_; }
+
     // Audio callbacks
     void SetAudioOutputCallback(AudioOutputCallback callback) { audioOutputCallback = callback; }
     void SetAudioInputCallback(AudioInputCallback callback) { audioInputCallback = callback; }
@@ -113,9 +119,9 @@ protected:
     // NextSampleNs, per direction, for the DMA's repeated asks.
     mutable NextSample txNext_, rxNext_;
 
-    // Frames per second. The OP-1's codec masters the link (its clocks are
-    // not SPORT's TCLKDIV/TFSDIV) at 44.1 kHz.
-    uint32_t sampleRateHz_ = 44100;
+    // Frames per second (DefaultRateHz). The OP-1's codec masters the link (its clocks are not SPORT's
+    // TCLKDIV/TFSDIV).
+    uint32_t sampleRateHz_ = DefaultRateHz();
 
     FILE* dump_ = nullptr;
     void OpenDump();

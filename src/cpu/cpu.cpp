@@ -1307,8 +1307,22 @@ void BlackFinCpu::AttachKeyboard(const std::shared_ptr<Keyboard>& keyboard) {
 
 void BlackFinCpu::AttachAudioOutput(const std::shared_ptr<AudioOutput>& audioOutput) {
     audioOutput_ = audioOutput;
-    auto cb = [audioOutput](const void* data, size_t samples, int channels, int bitsPerSample, bool stereo) {
-        audioOutput->WriteSamples(data, samples, channels, bitsPerSample, stereo);
+    // The host device runs at 44.1 kHz and paces guest time by what it plays: at a SPORT rate that divides it
+    // (22050), each frame is sent that many times over.
+    const uint32_t rate = SPORT::DefaultRateHz();
+    const unsigned repeat = (rate < 44100 && 44100 % rate == 0) ? 44100 / rate : 1;
+    auto cb = [audioOutput, repeat](const void* data, size_t samples, int channels, int bitsPerSample, bool stereo) {
+        if (repeat == 1) {
+            audioOutput->WriteSamples(data, samples, channels, bitsPerSample, stereo);
+            return;
+        }
+        const size_t frame = size_t(channels) * (bitsPerSample > 16 ? 4 : 2);
+        thread_local std::vector<uint8_t> wide;
+        wide.resize(samples * frame * repeat);
+        const auto* in = static_cast<const uint8_t*>(data);
+        for (size_t i = 0; i < samples; ++i)
+            for (unsigned r = 0; r < repeat; ++r) memcpy(&wide[(i * repeat + r) * frame], in + i * frame, frame);
+        audioOutput->WriteSamples(wide.data(), samples * repeat, channels, bitsPerSample, stereo);
     };
     sport0->SetAudioOutputCallback(cb);
     sport1->SetAudioOutputCallback(cb);
