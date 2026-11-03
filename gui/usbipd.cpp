@@ -37,8 +37,37 @@ static std::unique_ptr<char[]> Copy(const void* data, std::size_t length)
     return copy;
 }
 
-USBIPServer::USBIPServer(uvw::loop& loop, USBDevice& device) : loop(loop), device(device)
+USBIPServer::USBIPServer(uvw::loop& loop, USBDevice& device) : loop(loop), device(&device)
 {
+}
+
+void USBIPServer::Rebind(USBDevice* d)
+{
+    {
+        std::lock_guard devLock(deviceMutex);
+        device = d;
+    }
+    // ep0Claimed clears itself: the new device's control endpoint is idle.
+    std::lock_guard lock(mutex);
+    known = {};
+}
+
+bool USBIPServer::HasClient()
+{
+    std::lock_guard lock(mutex);
+    return attached != nullptr;
+}
+
+bool USBIPServer::DeviceConnected()
+{
+    std::lock_guard devLock(deviceMutex);
+    return device && device->IsConnected();
+}
+
+bool USBIPServer::DeviceControlIdle()
+{
+    std::lock_guard devLock(deviceMutex);
+    return !device || device->ControlIdle();
 }
 
 void USBIPServer::Start(unsigned int port)
@@ -103,7 +132,7 @@ bool USBIPServer::EP0Claimed()
 {
     // ControlIdle() takes the USB's lock: not under ours (the guest's
     // answers take the two the other way round).
-    if (ep0Claimed && device.ControlIdle()) ep0Claimed = false;
+    if (ep0Claimed && DeviceControlIdle()) ep0Claimed = false;
     return ep0Claimed;
 }
 
@@ -112,7 +141,7 @@ bool USBIPServer::ReplyImport(OP_REQ_IMPORT& req, uvw::tcp_handle& client)
     const bool claimed = EP0Claimed();
     std::lock_guard lock(mutex);
     uint32_t status = 0;
-    if (!device.IsConnected()) {
+    if (!DeviceConnected()) {
         // Refuse rather than let the host's first requests go unanswered: it would
         // give up after ~10 s, and those requests would be left in the controller.
         LogWarn("USBIP: refusing attach, the firmware has not connected to the USB bus yet");
@@ -223,7 +252,7 @@ void USBIPServer::ReplyDevList(uvw::tcp_handle& client, const Descriptors* descr
 
 void USBIPServer::HandleDevList(uvw::tcp_handle& client)
 {
-    if (!device.IsConnected()) {
+    if (!DeviceConnected()) {
         LogInfo("USBIP: list: the firmware has not connected to the USB bus yet");
         ReplyDevList(client, nullptr, 0); // nothing on the bus
         return;
@@ -239,7 +268,7 @@ void USBIPServer::HandleDevList(uvw::tcp_handle& client)
     }
     if (!read) {
         const bool claimed = EP0Claimed();
-        if (claimed || !device.ControlIdle()) {
+        if (claimed || !DeviceControlIdle()) {
             // Requests are still waiting on EP0 (the server's last ones, or
             // an earlier client's): one sent now would get their answers.
             LogWarn("USBIP: list: the firmware has not answered earlier requests yet");
@@ -292,7 +321,9 @@ void USBIPServer::RequestDescriptor(uint16_t value, uint16_t length)
     setup.wIndex = 0;
     setup.wLength = length;
     // The guest answers on the CPU thread, with the USB's lock held.
-    device.HandleSetupPacket(setup, nullptr, 0, [this, id = read->id] (const uint8_t* data, std::size_t length) {
+    std::lock_guard devLock(deviceMutex);
+    if (!device) return; // machine being rebuilt after a reset: the read times out
+    device->HandleSetupPacket(setup, nullptr, 0, [this, id = read->id] (const uint8_t* data, std::size_t length) {
         {
             std::lock_guard lock(mutex);
             answer.emplace(id, std::vector<uint8_t>(data, data + length));
@@ -421,8 +452,10 @@ static void FillIsocDesc(USBIP_ISOC_DESC* isoc, uint32_t number_of_packets, uint
 void USBIPServer::HandleURBRequest(USBIP_CMD_SUBMIT& req, uint8_t* data, std::size_t length, uvw::tcp_handle& client)
 {
     const uint64_t conn = connection;
+    std::lock_guard devLock(deviceMutex);
+    if (!device) return; // machine being rebuilt after a reset: the host retries or re-plugs
     if (req.ep == 0) { // Control Endpoint #0
-        device.HandleSetupPacket(req.setup, data, length, [req=req, &client, conn, this] (const uint8_t* data, std::size_t length) {
+        device->HandleSetupPacket(req.setup, data, length, [req=req, &client, conn, this] (const uint8_t* data, std::size_t length) {
             Learn(req.setup, data, length);
             Reply(client, conn, req, data, length, nullptr);
         });
@@ -431,7 +464,7 @@ void USBIPServer::HandleURBRequest(USBIP_CMD_SUBMIT& req, uint8_t* data, std::si
         for (int i = 0; i < req.number_of_packets; i++) {
             isoc[i] = *((USBIP_ISOC_DESC*)data + i);
         }
-        device.HandleDataRead(req.ep, req.interval, req.transfer_buffer_length, [req=req, isoc=isoc, &client, conn, this] (const uint8_t* data, std::size_t length) {
+        device->HandleDataRead(req.ep, req.interval, req.transfer_buffer_length, [req=req, isoc=isoc, &client, conn, this] (const uint8_t* data, std::size_t length) {
             FillIsocDesc(const_cast<USBIP_ISOC_DESC*>(isoc.data()), req.number_of_packets, length);
             Reply(client, conn, req, data, length, isoc.data());
         });
@@ -440,7 +473,7 @@ void USBIPServer::HandleURBRequest(USBIP_CMD_SUBMIT& req, uint8_t* data, std::si
         for (int i = 0; i < req.number_of_packets; i++) {
             isoc[i] = *((USBIP_ISOC_DESC*)(data + req.transfer_buffer_length) + i);
         }
-        device.HandleDataWrite(req.ep, req.interval, data, req.transfer_buffer_length, [req=req, isoc=isoc, &client, conn, this]() {
+        device->HandleDataWrite(req.ep, req.interval, data, req.transfer_buffer_length, [req=req, isoc=isoc, &client, conn, this]() {
             FillIsocDesc(const_cast<USBIP_ISOC_DESC*>(isoc.data()), req.number_of_packets, 0);
             Reply(client, conn, req, nullptr, req.transfer_buffer_length, isoc.data());
         });

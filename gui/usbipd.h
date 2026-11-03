@@ -26,6 +26,9 @@ public:
     USBIPServer(uvw::loop& loop, USBDevice& device);
     // Port 0 takes any free one; Port() tells which.
     void Start(unsigned int port = kDefaultPort);
+    void Rebind(USBDevice* d);
+    // A host is attached (fork-run refuses then: the child has no server thread to talk to it).
+    bool HasClient();
     unsigned int Port() const;
 
 private:
@@ -97,5 +100,10 @@ private:
     uvw::loop& loop;
     std::shared_ptr<uvw::tcp_handle> server;
 
-    USBDevice& device;
+    // A system reset replaces the USB device (Rebind; nullptr while the machine is rebuilt): later requests go
+    // to the new one, like a re-plug. deviceMutex is held while a call is in the device and by Rebind, alone.
+    USBDevice* device;
+    std::recursive_mutex deviceMutex;
+    bool DeviceConnected();
+    bool DeviceControlIdle();
 };

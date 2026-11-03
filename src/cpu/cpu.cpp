@@ -8,6 +8,7 @@
 #include "twi.h"
 #include "sic.h"
 #include "coretimer.h"
+#include "watchdog.h"
 #include "otp.h"
 #include "gptimer.h"
 #include "dma.h"
@@ -238,6 +239,9 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
         LatchLines();
     });
     devices.emplace_back(coreTimer);
+    watchdog_ = std::make_shared<Watchdog>(0xFFC00200);
+    watchdog_->SetResetCallback([this]() { resetRequested_.store(true, std::memory_order_release); });
+    devices.emplace_back(watchdog_);
 
     std::shared_ptr<TWI> twi = std::make_shared<TWI>(0xFFC01400, &time_);
     devices.push_back(twi);
@@ -542,6 +546,7 @@ void BlackFinCpu::HostWork(bool would) {
     const uint64_t blockEnd = time_.Cycles();
     coreTimer->Advance(blockEnd);
     AdvanceGpTimers(blockEnd);
+    watchdog_->Advance(blockEnd);
 
     ServicePanel();
     ProcessEvents();
@@ -820,7 +825,20 @@ BlackFinCpu::RemoteTierStats BlackFinCpu::RemoteTierCounts() const {
     return {s.submitted, s.refused, s.installed, s.stale, s.failed};
 }
 
+void BlackFinCpu::SuspendTierWorker() {
+    if (!tierBackground_) return;
+    workerClockSet_.store(false, std::memory_order_release);
+    core_->set_tier_background(false);
+}
+
+void BlackFinCpu::ResumeTierWorker() {
+    if (tierBackground_) SetTierBackground(true, tierPublishAfter_, tierJitCpu_);
+}
+
 void BlackFinCpu::SetTierBackground(bool background, uint64_t publishAfter, int jitCpu) {
+    tierBackground_ = background;
+    tierPublishAfter_ = publishAfter;
+    tierJitCpu_ = jitCpu;
     if (!publishAfter) publishAfter = kTierPublishAfter;
     workerClockSet_.store(false, std::memory_order_release);  // the worker it names stops here
     core_->set_tier_background(background, time_.Deterministic() ? publishAfter : 0, [this, jitCpu] {

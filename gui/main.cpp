@@ -2,6 +2,7 @@
 #include "cpu/cpu.h"
 #include "cpu/dma.h"
 #include "cpu/twi.h"
+#include "cpu/sport.h"
 #include "peripheral/MT29F4G08.h"
 #include "utils/log.h"
 #include "glfw_display.h"
@@ -28,6 +29,12 @@
 #include <fstream>
 #include <fcntl.h>
 #include <unistd.h>
+#include <climits>
+#include <cerrno>
+#include <cstdio>
+#include <new>
+#include <sys/stat.h>
+#include <sys/wait.h>
 
 std::atomic<bool> cpuShouldStop(false);
 
@@ -35,6 +42,17 @@ std::atomic<bool> cpuShouldStop(false);
 // destructors and loses buffered output, so request a clean shutdown instead.
 // The handler only stores to a lock-free atomic on the supported host.
 static_assert(std::atomic<bool>::is_always_lock_free);
+// fork-run: the CPU thread parks between Run() calls while cpuPause is set (cpuPaused acknowledges it).
+static std::atomic<bool> cpuPause{false}, cpuPaused{false};
+static bool forkChild = false;
+
+static void ParkIfPaused() {
+    if (!cpuPause.load()) return;
+    cpuPaused.store(true);
+    while (cpuPause.load() && !cpuShouldStop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    cpuPaused.store(false);
+}
+
 static void StopSigHandler(int) {
     cpuShouldStop.store(true);
 }
@@ -81,11 +99,13 @@ void LdrExecutionThread(BlackFinCpu& cpu, const LDRParser& parser) {
     LogInfo("CPU thread exiting");
 }
 
-void BootExcutionThread(BlackFinCpu& cpu) {
-    cpu.SetPC(0xEF000000); // Boot entry point
+void BootExcutionThread(BlackFinCpu& cpu, bool resume) {
+    if (!resume) cpu.SetPC(0xEF000000); // Boot entry point (a fork-run child resumes where the parent paused)
     while (!cpuShouldStop.load()) {
+        ParkIfPaused();
         cpu.Run();
         if (cpu.Failed()) cpuShouldStop.store(true);
+        if (cpu.ResetRequested()) { LogInfo("CPU thread exiting for a system reset"); return; }
     }
     cpuShouldStop.store(true);
     LogInfo("CPU thread exiting");
@@ -340,6 +360,13 @@ static int RunEmulator(int argc, char* argv[]) {
                      "         first wait: queued before the CPU starts)\n"
                      "  accel X Y Z | accel random | volume 0..255\n"
                      "  wait-frames N [TIMEOUT_MS] | screenshot PATH.ppm\n"
+                     "  turn ENC cw|ccw [N [FRAMES]] | wheel ENC NOTCHES | hold KEY FRAMES\n"
+                     "  audio-pos PATH | audio-anchor | wait-audio N|@N [MS] | barrier PATH\n"
+                     "  poke ADDR VALUE | dump-mem ADDR LEN PATH | snapshot-mem ADDR LEN PATH [...] (hex)\n"
+                     "  fork-run SCRIPT OUTDIR (run SCRIPT in a forked copy of the machine as it is now, in\n"
+                     "  OUTDIR; the parent goes on from the same state afterwards)\n"
+                     "With --headless --deterministic the CPU stops at the frame a wait-frames, hold or turn\n"
+                     "waits for until the commands after it are queued (lockstep).\n"
                      "Keys are button names from gui/ui.json. Tap defaults to 100ms.\n"
                      "Wait/tap use wall time. EOF leaves the emulator running; quit or Ctrl-C stops it.\n";
         return help ? 0 : 1;
@@ -380,24 +407,31 @@ static int RunEmulator(int argc, char* argv[]) {
     std::signal(SIGTERM, StopSigHandler);
     std::signal(SIGINT, StopSigHandler);
 
-    // Create BlackFin CPU
-    BlackFinCpu cpu(deterministic);
-    cpu.SetTwiSpeedup(twiSpeedup);
-    cpu.SetMdmaSpeedup(mdmaSpeedup);
-    // An LDR runs with the host looking at the PC after every block
-    // (LdrExecutionThread).
-    if (chainDry && noChain) throw std::runtime_error("--profile-chain-dry checks chaining: not with --no-chain");
-    cpu.SetChaining(!noChain && positional.size() < 2, chainDry);
-    if (noLoopBlocks) cpu.SetLoopBlocks(false);
-    if (noIdleWait) cpu.SetIdleWaits(false);
-    cpu.SetSteadySkip(steadySkip);
-    cpu.SetTiering(static_cast<uint32_t>(tierThreshold), static_cast<uint32_t>(tierSizeRef));
-    cpu.SetLightTier1(lightTier1);
-    cpu.SetTierBackground(tierBackground, static_cast<uint64_t>(tierPublishAfter), static_cast<int>(jitCpu));
-    cpu.SetCopyPatch(copyPatch);
-    cpu.SetCopyPatchHints(copyPatchHints);
-    if (noDmaSettle) cpu.SetDmaSettling(false);
-    if (rtcEpoch) cpu.SetRtcEpoch(std::chrono::system_clock::time_point(std::chrono::seconds(*rtcEpoch)));
+    // Create BlackFin CPU. A watchdog reset destroys it and makes a new one (makeCpu again), as a real reset
+    // starts over from the boot ROM; the frontends, the NAND and the USB/IP server stay.
+    std::unique_ptr<BlackFinCpu> cpuOwner;
+    BlackFinCpu* cpu = nullptr;
+    auto makeCpu = [&]() {
+        cpuOwner = std::make_unique<BlackFinCpu>(deterministic);
+        cpu = cpuOwner.get();
+        cpu->SetTwiSpeedup(twiSpeedup);
+        cpu->SetMdmaSpeedup(mdmaSpeedup);
+        // An LDR runs with the host looking at the PC after every block
+        // (LdrExecutionThread).
+        if (chainDry && noChain) throw std::runtime_error("--profile-chain-dry checks chaining: not with --no-chain");
+        cpu->SetChaining(!noChain && positional.size() < 2, chainDry);
+        if (noLoopBlocks) cpu->SetLoopBlocks(false);
+        if (noIdleWait) cpu->SetIdleWaits(false);
+        cpu->SetSteadySkip(steadySkip);
+        cpu->SetTiering(static_cast<uint32_t>(tierThreshold), static_cast<uint32_t>(tierSizeRef));
+        cpu->SetLightTier1(lightTier1);
+        cpu->SetTierBackground(tierBackground, static_cast<uint64_t>(tierPublishAfter), static_cast<int>(jitCpu));
+        cpu->SetCopyPatch(copyPatch);
+        cpu->SetCopyPatchHints(copyPatchHints);
+        if (noDmaSettle) cpu->SetDmaSettling(false);
+        if (rtcEpoch) cpu->SetRtcEpoch(std::chrono::system_clock::time_point(std::chrono::seconds(*rtcEpoch)));
+    };
+    makeCpu();
 #ifdef ENABLE_PROFILING
     std::unique_ptr<Profiler> profiler;
     if (anyProfiling) {
@@ -446,23 +480,28 @@ static int RunEmulator(int argc, char* argv[]) {
             if (profileTrace.empty()) throw std::runtime_error("--profile-trace-events sizes --profile-trace: add it");
             profile.traceEvents = count(profileTraceEvents, "--profile-trace-events", false);
         }
-        profiler = std::make_unique<Profiler>(profile, cpu, [] { cpuShouldStop.store(true); });
-        cpu.SetProfiler(profiler.get());
+        profiler = std::make_unique<Profiler>(profile, *cpu, [] { cpuShouldStop.store(true); });
+        cpu->SetProfiler(profiler.get());
         // The verified-frame mark sees exactly the pixels the frontend gets.
         if (profiler->WantsFrames()) display = std::make_shared<FrameTap>(display, *profiler);
     }
 #endif
-    cpu.AttachDisplay(display);
-    cpu.AttachKeyboard(keyboard);
-    if (teBoot) BootKeys::HoldComForBoot(cpu);
     // SPORT still drains DMA and advances its sample accounting without a
     // host sink. Avoid opening ALSA/PulseAudio devices on headless hosts.
-    if (!headless) cpu.AttachAudioOutput(std::make_shared<MiniaudioOutput>(audioBufferMs));
-    cpu.SetBootMode(0x0D); // Set BMODE to 0b1101, boot from NAND flash with port H
+    std::shared_ptr<MiniaudioOutput> audioOutput;
+    if (!headless) audioOutput = std::make_shared<MiniaudioOutput>(audioBufferMs);
+    auto attachFrontends = [&]() {
+        cpu->AttachDisplay(display);
+        cpu->AttachKeyboard(keyboard);
+        if (audioOutput) cpu->AttachAudioOutput(audioOutput);
+        cpu->SetBootMode(0x0D); // Set BMODE to 0b1101, boot from NAND flash with port H
+    };
+    attachFrontends();
+    if (teBoot) BootKeys::HoldComForBoot(*cpu);
 
     auto loop = uvw::loop::get_default();
     // Its handles are made before the loop runs them, on its thread.
-    USBIPServer usbipd(*loop, cpu.GetUSB());
+    USBIPServer usbipd(*loop, cpu->GetUSB());
     // OP1EMU_USBIP_PORT: another port than 3240, so that regression runs can each have their own.
     unsigned usbipPort = USBIPServer::kDefaultPort;
     if (const char* value = std::getenv("OP1EMU_USBIP_PORT")) {
@@ -491,10 +530,10 @@ static int RunEmulator(int argc, char* argv[]) {
     }
 
     // Load NAND Flash underlying storage
-    auto nandFlash = std::make_shared<MT29F4G08>(cpu, positional[0], nandSnapshot);
+    auto nandFlash = std::make_shared<MT29F4G08>(*cpu, positional[0], nandSnapshot);
     if (nandSnapshot)
         LogInfo("NAND flash image opened read-only (snapshot mode; guest writes will be discarded)");
-    cpu.AttachNandFlash(nandFlash);
+    cpu->AttachNandFlash(nandFlash);
 
     uint64_t sensorVersion = UINT64_MAX; // forces the first headless push
     bool randomAccelSent = false;
@@ -511,18 +550,18 @@ static int RunEmulator(int argc, char* argv[]) {
             int16_t ax = static_cast<int16_t>((std::rand() % (540 - 50 + 1)) + 50); // ax in [50, 540]
             int16_t ay = static_cast<int16_t>((std::rand() % (-50 - (-540) + 1)) + (-540)); // ay in [-540, -50]
             int16_t az = static_cast<int16_t>((std::rand() % (874 - 75 + 1)) + 75); // az in [75, 874]
-            cpu.SetAcceleration(ax, ay, az); // Placeholder for random accelerometer data
+            cpu->SetAcceleration(ax, ay, az); // Placeholder for random accelerometer data
         }
         if (headless) {
             // Script-set sensors are pushed once per change; the CPU keeps the value.
             if (sensorsChanged) {
                 const auto& sensors = console->GetSensors();
-                if (sensors.accelFixed) cpu.SetAcceleration(sensors.ax, sensors.ay, sensors.az);
-                cpu.SetPotentiometerValue(0xFF - sensors.volume);
+                if (sensors.accelFixed) cpu->SetAcceleration(sensors.ax, sensors.ay, sensors.az);
+                cpu->SetPotentiometerValue(0xFF - sensors.volume);
                 sensorVersion = console->SensorVersion();
             }
         } else {
-            cpu.SetPotentiometerValue(0xFF - window->GetVolumeValue()); // Update potentiometer (volume) value
+            cpu->SetPotentiometerValue(0xFF - window->GetVolumeValue()); // Update potentiometer (volume) value
         }
     };
     // A script's leading commands (up to its first wait) take effect before
@@ -534,17 +573,197 @@ static int RunEmulator(int argc, char* argv[]) {
     // Start CPU execution thread
     std::thread cpuThread;
     if (positional.size() > 1) {
-        cpuThread = std::thread(LdrExecutionThread, std::ref(cpu), std::ref(parser));
+        cpuThread = std::thread(LdrExecutionThread, std::ref(*cpu), std::ref(parser));
     } else {
         // If no LDR file is provided, just run the CPU without loading any code
-        cpuThread = std::thread(BootExcutionThread, std::ref(cpu));
+        cpuThread = std::thread(BootExcutionThread, std::ref(*cpu), false);
     }
+
+    // Headless commands that need the machine (see the usage text):
+    //   fork-run SCRIPT OUTDIR  pause the CPU between Run() calls and fork(); the child gets the whole machine as it
+    //                           is (RAM, devices, queued events, JIT, NAND overlay, copy-on-write), starts a fresh CPU
+    //                           thread, runs SCRIPT's commands in OUTDIR (screenshots, audio dump, break dumps land
+    //                           there) and exits at its quit; the parent waits, then goes on from the same state, so
+    //                           every flow starts from the identical post-boot machine. USB/IP is not available in
+    //                           the child (its server thread is not copied by fork). Use --deterministic.
+    //   snapshot-mem ADDR LEN PATH [...] reads up to 16 RAM ranges under one CPU pause.
+    //   dump-mem ADDR LEN PATH  write guest memory (hex ADDR, LEN) to PATH, with the CPU paused.
+    if (headless && deterministic) console->SetLockstep(true);
+    if (headless) SPORT::txHook = [&](uint64_t delivered) { console->OnAudioDelivered(delivered); };
+    auto pauseCpu = [&]() {
+        cpuPause.store(true);
+        console->OpenGate();        // a CPU held at a lockstep frame must get back out of Run() to park
+        while (!cpuPaused.load() && !cpuShouldStop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+    // After a fork-run the parent stays paused, so back-to-back fork-runs all start from the same instruction; the
+    // first other command resumes it.
+    bool heldByFork = false;
+    if (headless) console->SetCommandHook([&](const std::vector<std::string>& args) -> bool {
+        if (heldByFork && args[0] != "fork-run" && args[0] != "dump-mem" && args[0] != "snapshot-mem" && args[0] != "barrier" &&
+            args[0] != "audio-pos") {
+            heldByFork = false;
+            cpuPause.store(false);
+        }
+        if (args[0] == "barrier" && args.size() == 2) {
+            std::ofstream out(args[1]);
+            out << "ok\n";
+            out.close();
+            if (!out) throw std::runtime_error("barrier: cannot write " + args[1]);
+            return true;
+        }
+        if (args[0] == "audio-pos" && args.size() == 2) {
+            // audio-pos PATH: append "<display frame> <sport0 dump bytes>" read with the CPU stopped, so a film
+            // capture can place every screenshot exactly on the audio timeline.
+            const bool held = console->GateHeld();
+            if (!held) pauseCpu();
+            const long bytes = cpu->AudioDumpBytes();
+            const auto frame = console->FrameCount();
+            const auto delivered = cpu->AudioDelivered();
+            if (!held && !heldByFork) cpuPause.store(false);
+            std::ofstream out(args[1], std::ios::app);
+            out << frame << ' ' << bytes << ' ' << delivered << '\n';
+            if (!out) throw std::runtime_error("audio-pos: cannot write " + args[1]);
+            return true;
+        }
+        if (args[0] == "poke" && args.size() == 3) {       // poke ADDR VALUE (hex, a 32-bit word): a probe's request
+            const u32 addr = (u32)std::stoul(args[1], nullptr, 16), value = (u32)std::stoul(args[2], nullptr, 16);
+            const bool held = console->GateHeld();
+            if (!held) pauseCpu();
+            cpu->GetEmulator().MemoryWrite(addr, &value, 4);
+            if (!held && !heldByFork) cpuPause.store(false);
+            LogInfo("poke %#x = %#x", addr, value);
+            return true;
+        }
+        if (args[0] == "snapshot-mem") {
+            // Multiple RAM observations at one guest instruction. No MMR reads:
+            // their read side effects would violate this command's observer contract.
+            if (args.size() < 4 || (args.size() - 1) % 3 || args.size() > 49)
+                throw std::runtime_error("snapshot-mem: ADDR LEN PATH triples, 1..16 ranges");
+            struct Range { u32 addr, len; std::string path; std::vector<u8> bytes; };
+            std::vector<Range> ranges;
+            u64 total = 0;
+            for (size_t i = 1; i < args.size(); i += 3) {
+                size_t ap = 0, lp = 0;
+                const auto addr = std::stoull(args[i], &ap, 16), len = std::stoull(args[i + 1], &lp, 16);
+                if (ap != args[i].size() || lp != args[i + 1].size())
+                    throw std::runtime_error("snapshot-mem: malformed hexadecimal range");
+                const auto end = addr + len;
+                const bool ram = (addr < 0x08000000 && end <= 0x08000000) ||
+                    (addr >= 0xFF800000 && end <= 0xFF808000) ||
+                    (addr >= 0xFF900000 && end <= 0xFF908000) ||
+                    (addr >= 0xFFA00000 && end <= 0xFFA0C000) ||
+                    (addr >= 0xFFA10000 && end <= 0xFFA14000) ||
+                    (addr >= 0xFFB00000 && end <= 0xFFB01000);
+                if (!len || end < addr || !ram || (total += len) > 0x02000000)
+                    throw std::runtime_error("snapshot-mem: RAM ranges only; total <= 32 MiB");
+                ranges.push_back({(u32)addr, (u32)len, args[i + 2], std::vector<u8>((size_t)len)});
+            }
+            const bool held = console->GateHeld();
+            if (!held) pauseCpu();
+            try {
+                for (auto& r : ranges) cpu->GetEmulator().MemoryRead(r.addr, r.bytes.data(), (int)r.len);
+            } catch (...) {
+                if (!held && !heldByFork) cpuPause.store(false);
+                throw;
+            }
+            if (!held && !heldByFork) cpuPause.store(false);
+            for (const auto& r : ranges) {
+                std::ofstream out(r.path, std::ios::binary);
+                out.write(reinterpret_cast<const char*>(r.bytes.data()), r.len);
+                if (!out) throw std::runtime_error("snapshot-mem: cannot write " + r.path);
+            }
+            LogInfo("snapshot-mem: %zu RAM ranges, %llu bytes at one guest instruction", ranges.size(), (unsigned long long)total);
+            return true;
+        }
+        if (args[0] == "dump-mem" && args.size() == 4) {
+            const u32 addr = (u32)std::stoul(args[1], nullptr, 16), len = (u32)std::stoul(args[2], nullptr, 16);
+            if (!len || len > 0x8000000) throw std::runtime_error("dump-mem: LEN must be 1..0x8000000");
+            std::vector<u8> buf(len);
+            if (console->GateHeld()) {          // lockstep: stopped at a frame already; reading keeps the timing
+                cpu->GetEmulator().MemoryRead(addr, buf.data(), (int)len);
+            } else {
+                pauseCpu();
+                cpu->GetEmulator().MemoryRead(addr, buf.data(), (int)len);
+                if (!heldByFork) cpuPause.store(false);
+            }
+            std::ofstream out(args[3], std::ios::binary);
+            out.write(reinterpret_cast<const char*>(buf.data()), len);
+            if (!out) throw std::runtime_error("dump-mem: cannot write " + args[3]);
+            LogInfo("dump-mem %#x..%#x -> %s", addr, addr + len, args[3].c_str());
+            return true;
+        }
+        if (args[0] != "fork-run" || args.size() != 3) return false;
+        if (positional.size() > 1) throw std::runtime_error("fork-run needs a NAND boot (no LDR file)");
+        if (forkChild) throw std::runtime_error("fork-run inside a fork-run flow");
+        if (usbipd.HasClient()) throw std::runtime_error("fork-run: a USB/IP host is attached (detach it first)");
+        char script[PATH_MAX];
+        if (!realpath(args[1].c_str(), script)) throw std::runtime_error("fork-run: no script " + args[1]);
+        mkdir(args[2].c_str(), 0755);
+        pauseCpu();
+        cpu->SuspendTierWorker();   // its thread would not be in the child
+        std::fflush(nullptr);
+        const auto t0 = std::chrono::steady_clock::now();
+        const pid_t pid = fork();
+        if (pid < 0) { cpu->ResumeTierWorker(); cpuPause.store(false); throw std::runtime_error("fork-run: fork failed"); }
+        if (pid == 0) {
+            forkChild = true;
+            if (chdir(args[2].c_str()) != 0) _exit(70);
+            if (std::getenv("OP1EMU_AUDIO_DUMP")) setenv("OP1EMU_AUDIO_DUMP", ".", 1);
+            if (std::getenv("OP1EMU_BREAK_DIR")) { mkdir("brk", 0755); setenv("OP1EMU_BREAK_DIR", "brk", 1); }
+            cpu->ReopenAudioDumps();
+            cpu->ResumeTierWorker();
+            const int fd = open(script, O_RDONLY | O_NONBLOCK);
+            if (fd < 0) _exit(71);
+            console->ReplaceInput(fd);
+            close(fd);
+            // The parent's CPU thread is not in this process: keep its handle where nothing destroys it.
+            alignas(std::thread) static unsigned char stale[sizeof(std::thread)];
+            new (stale) std::thread(std::move(cpuThread));
+            heldByFork = false;
+            cpuPaused.store(false);
+            cpuPause.store(false);
+            cpuThread = std::thread(BootExcutionThread, std::ref(*cpu), true);
+            LogInfo("fork-run: flow %s in %s (pid %d)", script, args[2].c_str(), (int)getpid());
+            return true;
+        }
+        cpu->ResumeTierWorker();
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        LogInfo("fork-run: %s finished with %d in %.1f s", args[2].c_str(), code, secs);
+        const auto statusPath = args[2] + "/fork-run.status";
+        { std::ofstream out(statusPath + ".tmp"); out << code << ' ' << secs << '\n'; }
+        if (std::rename((statusPath + ".tmp").c_str(), statusPath.c_str()) != 0)
+            throw std::runtime_error("fork-run: cannot publish exit status");
+        heldByFork = true;          // stays paused until a command other than fork-run / dump-mem
+        return true;
+    });
 
     // Main thread handles GLFW display or headless input. cpuShouldStop is in
     // the condition so SIGTERM/SIGINT and CPU thread exit end the loop too.
     int result = 0;
     try {
         while (!cpuShouldStop.load() && !(headless ? console->ShouldClose() : window->ShouldClose())) {
+            if (cpu->ResetRequested()) {
+                // Watchdog reset: drop the machine and boot a new one from the boot ROM.
+#ifdef ENABLE_PROFILING
+                if (profiler) throw std::runtime_error("System reset: not with profiling (the profiler watches one machine)");
+#endif
+                cpuThread.join();
+                usbipd.Rebind(nullptr);
+                cpuOwner.reset();
+                cpu = nullptr;
+                makeCpu();
+                attachFrontends();
+                nandFlash->Rebind(*cpu);
+                cpu->AttachNandFlash(nandFlash);
+                usbipd.Rebind(&cpu->GetUSB());
+                sensorVersion = UINT64_MAX;
+                pushSensors();
+                cpuThread = std::thread(BootExcutionThread, std::ref(*cpu), false);
+                LogInfo("System reset: booting again");
+            }
             if (headless) console->PollEvents();
             else window->PollEvents();
             pushSensors();
@@ -560,6 +779,7 @@ static int RunEmulator(int argc, char* argv[]) {
     // Signal CPU thread to stop and wait for it
     LogInfo("Stopping CPU thread...");
     cpuShouldStop.store(true);
+    if (headless) { console->SetLockstep(false); console->OpenGate(); }
     cpuThread.join();
     // OP1_DUMP_MEM=ADDR:LEN:PATH (hex ADDR/LEN) writes any guest range at exit.
     if (const char* spec = std::getenv("OP1_DUMP_MEM")) {
@@ -568,13 +788,17 @@ static int RunEmulator(int argc, char* argv[]) {
         const u32 len = (end && *end == ':') ? (u32)strtoul(end + 1, &end, 16) : 0;
         if (len && end && *end == ':') {
             std::vector<u8> buf(len);
-            cpu.GetEmulator().MemoryRead(addr, buf.data(), (int)len);
+            cpu->GetEmulator().MemoryRead(addr, buf.data(), (int)len);
             std::ofstream(end + 1, std::ios::binary).write(reinterpret_cast<const char*>(buf.data()), len);
         }
     }
-    if (cpu.Failed()) {
+    if (cpu->Failed()) {
         LogError("Emulation stopped: CPU execution failed");
         result = 1;
+    }
+    if (forkChild) {               // the USB/IP and uv threads of the parent don't exist here: no destructors
+        std::fflush(nullptr);
+        _exit(result);
     }
 #ifdef ENABLE_PROFILING
     if (profiler && !profiler->Finish()) {

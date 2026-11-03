@@ -39,6 +39,7 @@ class DMA;
 class TWI;
 class USB;
 class CoreTimer;
+class Watchdog;
 class GPIO;
 class PPI;
 class Display;
@@ -126,6 +127,10 @@ public:
     // first Run().
     static constexpr uint64_t kTierPublishAfter = uint64_t(1) << 23;
     void SetTierBackground(bool background, uint64_t publishAfter = 0, int jitCpu = -1);
+    // fork-run: a forked child has no JIT worker thread. Suspend stops it (what it compiled is published) with
+    // the CPU thread parked, before fork(); Resume starts one again, in the parent and in the child.
+    void SuspendTierWorker();
+    void ResumeTierWorker();
     // Tier 0 copies blocks together from stencils where it can
     // (Core::set_copy_patch, on by default), the rest it compiles with LLVM.
     // Before the first Run().
@@ -202,6 +207,9 @@ public:
     // True once the JIT could not translate or run a block. The CPU state is
     // then no longer advancing, so the host should stop instead of retrying.
     bool Failed() const { return failed_.load(std::memory_order_acquire); }
+    // True once the watchdog reset the system: the CPU thread stops and the host rebuilds the machine (a real
+    // reset reloads everything from the boot ROM; the NAND keeps its contents).
+    bool ResetRequested() const { return resetRequested_.load(std::memory_order_acquire); }
 
     void QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay = std::chrono::nanoseconds(1));
 
@@ -264,6 +272,11 @@ protected:
 
     std::shared_ptr<SIC> sic;
     std::shared_ptr<CoreTimer> coreTimer;
+    std::shared_ptr<Watchdog> watchdog_;
+    std::atomic<bool> resetRequested_{false};
+    bool tierBackground_ = false;
+    uint64_t tierPublishAfter_ = 0;
+    int tierJitCpu_ = -1;
     std::shared_ptr<GPIO> portG;
     std::shared_ptr<PPI> ppi;
     std::shared_ptr<OLED> oled;
