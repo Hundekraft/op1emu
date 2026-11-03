@@ -1,4 +1,5 @@
 #pragma once
+#include <set>
 
 // bcore headers (from ext/bcore/include/)
 #include "mem.h"
@@ -27,6 +28,9 @@ public:
 
     // Records the fault in DCPLB_FAULT_STATUS/ADDR and ICPLB_FAULT_STATUS/ADDR for the guest's EVT3 handler.
     void data_alignment_fault(uint32_t pc, uint32_t addr, uint32_t status) override;
+    // OP1EMU_STRICT_MEMORY=1 (see the constructor).
+    bool strict_data_checks() const override { return strictData_; }
+    uint32_t check_data_access(uint32_t pc, uint32_t addr, uint32_t width, uint32_t flags, bool record = true) override;
     const uint8_t* raw() const override;
 
     uint32_t rawmem_limit() const override { return 0; }
@@ -70,4 +74,9 @@ private:
     mutable uint64_t chainStops_ = 0;
     void Access(uint32_t addr, int widthIndex, bool write) const;
 #endif
+    bool strictData_ = false;
+    bool cplbDirty_ = true;
+    uint32_t dmemControl_ = 0, cplbAddress_[16]{}, cplbData_[16]{};
+    std::set<uint32_t> unknownMmrs_;
+    void refreshDataProtection();
 };

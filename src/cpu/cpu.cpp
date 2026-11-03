@@ -327,6 +327,33 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     oled = std::make_shared<OLED>(oledDatabus, oledCs, oledRs, oledRd, oledWr);
 
     // Initialize bcore after all devices are bound
+    // Debug: OP1EMU_WATCH=ADDR[,WORDS] / OP1EMU_WATCHW=ADDR[,WORDS] (hex address) log the guest block pc of 32-bit
+    // reads / writes of those words (first 200). A hooked page is no direct page, so the JIT calls back for it.
+    if (const char* w = getenv("OP1EMU_WATCH")) {
+        const u32 base = strtoul(w, nullptr, 16);
+        const char* c = strchr(w, ',');
+        const u32 words = c ? strtoul(c + 1, nullptr, 10) : 1;
+        for (u32 i = 0; i < words; ++i)
+            emulator.AddReadHook(base + i * 4, [this](u32 addr) {
+                u32 v = 0;
+                emulator.MemoryRead(addr, &v, 4);
+                static unsigned hits = 0;
+                if (hits++ < 200) LogInfo("watch: read [%#x] = %#x, block pc %#x", addr, v, cpuState_->pc);
+                return v;
+            });
+    }
+    if (const char* w = getenv("OP1EMU_WATCHW")) {
+        const u32 base = strtoul(w, nullptr, 16);
+        const char* c = strchr(w, ',');
+        const u32 words = c ? strtoul(c + 1, nullptr, 10) : 1;
+        for (u32 i = 0; i < words; ++i)
+            emulator.AddWriteHook(base + i * 4, [this](u32 addr, u32 v) {
+                emulator.MemoryWrite(addr, &v, 4);
+                static unsigned hits = 0;
+                if (hits++ < 200) LogInfo("watchw: write [%#x] = %#x, block pc %#x", addr, v, cpuState_->pc);
+            });
+    }
+
     bcoreMemory_ = std::make_unique<EmulatorMemory>(emulator);
     bcoreMemory_->SetChainBudget(&cpuState_->chain_budget);
     bcoreMemory_->SetUnstableReads(&cpuState_->unstable_reads);
@@ -434,6 +461,19 @@ void BlackFinCpu::InvalidateTranslations() {
 }
 
 HaltReason BlackFinCpu::Run() {
+    // OP1EMU_STATS: guest seconds per host second and host returns, every 5 s of host time.
+    static const bool stats = getenv("OP1EMU_STATS") != nullptr;
+    if (stats && (++statsRuns_ & 0xFFFF) == 0) {
+        const uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (!statsHostNs_) { statsHostNs_ = now; statsGuestNs_ = time_.Nanoseconds(); statsRunsAt_ = statsRuns_; }
+        else if (now - statsHostNs_ > 5'000'000'000ull) {
+            const double host = (now - statsHostNs_) / 1e9, guest = (time_.Nanoseconds() - statsGuestNs_) / 1e9;
+            LogInfo("stats: guest %.3f s in %.3f s host (%.2fx), %.0f runs/s, guest at %.3f s", guest, host, guest / host,
+                    (statsRuns_ - statsRunsAt_) / host, time_.Nanoseconds() / 1e9);
+            statsHostNs_ = now; statsGuestNs_ = time_.Nanoseconds(); statsRunsAt_ = statsRuns_;
+        }
+    }
     if (pcProf_) {
         const uint32_t entry = cpuState_->pc;
         const auto t0 = std::chrono::steady_clock::now();
@@ -778,6 +818,13 @@ uint64_t BlackFinCpu::Pace(uint64_t targetNs) {
     if (audioOutput_) pacer_.SetRate(audioOutput_->GuestRate(wall), wall);
     pacer_.Sync(time_.Nanoseconds(), wall);
     uint64_t clockNs = pacer_.GuestNsAt(wall);
+    // OP1EMU_LAG_LOG=MS: the guest more than MS behind the host's clock (once per second at most).
+    static const long lagLogMs = getenv("OP1EMU_LAG_LOG") ? strtol(getenv("OP1EMU_LAG_LOG"), nullptr, 10) : -1;
+    if (lagLogMs >= 0 && clockNs > targetNs + uint64_t(lagLogMs) * 1'000'000 && wall - lagLoggedNs_ > 1'000'000'000) {
+        lagLoggedNs_ = wall;
+        LogInfo("lag %.1f ms: guest %.3f s, pc %#x ivg %d", (clockNs - targetNs) / 1e6, targetNs / 1e9, cpuState_->pc,
+                bcore::cec_current_ivg());
+    }
     if (targetNs <= clockNs + RealtimePacer::kAheadNs) return targetNs;
 #ifdef __EMSCRIPTEN__
     // The browser's event loop is the only thread: instead of the sleep,

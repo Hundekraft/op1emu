@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <chrono>
 #include "MT29F4G08.h"
 #include "cpu/cpu.h"
 #include "utils/log.h"
@@ -285,7 +287,7 @@ u32 MT29F4G08::GetBlockAddress() const {
     return pageNumber / PAGES_PER_BLOCK;
 }
 
-void MT29F4G08::LoadPage(u32 pageNumber) {
+void MT29F4G08::LoadPageUntimed(u32 pageNumber) {
     if (pageNumber >= TOTAL_PAGES) {
         std::fill(pageBuffer.begin(), pageBuffer.end(), ERASED_VALUE);
         return;
@@ -318,6 +320,19 @@ void MT29F4G08::LoadPage(u32 pageNumber) {
         std::fill(pageBuffer.begin(), pageBuffer.end(), ERASED_VALUE);
         storageFile.clear();
     }
+}
+
+// OP1EMU_NAND_TIME: host time of page reads, logged every 1000 pages (debug).
+void MT29F4G08::LoadPage(u32 pageNumber) {
+    static const bool timeReads = getenv("OP1EMU_NAND_TIME") != nullptr;
+    if (!timeReads) { LoadPageUntimed(pageNumber); return; }
+    static uint64_t reads = 0, totalNs = 0, maxNs = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    LoadPageUntimed(pageNumber);
+    const uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+    totalNs += ns; maxNs = std::max(maxNs, ns);
+    if (++reads % 1000 == 0)
+        LogInfo("NAND: %llu page reads, %.1f us mean, %.1f us max", (unsigned long long)reads, totalNs / 1e3 / reads, maxNs / 1e3);
 }
 
 void MT29F4G08::SavePage(u32 pageNumber) {

@@ -367,6 +367,7 @@ protected:
     std::unordered_map<uint32_t, PcProf> pcProfile_;
     uint64_t pcProfPrintNs_ = 0;
     uint32_t lastRunPackets_ = 0;
+    uint64_t lagLoggedNs_ = 0, statsRuns_ = 0, statsRunsAt_ = 0, statsHostNs_ = 0, statsGuestNs_ = 0;
     void PrintPcProfile();
     // A block is running (Core::run): what a device access queues now was
     // not in the run's budget.

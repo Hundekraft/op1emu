@@ -129,6 +129,11 @@ static int RunEmulator(int argc, char* argv[]) {
     unsigned twiSpeedup = TWI::kDefaultSpeedup;
     unsigned mdmaSpeedup = DMA::kDefaultMdmaSpeedup;
     unsigned audioBufferMs = MiniaudioOutput::kDefaultBufferMs;
+    // OP1EMU_AUDIO_MS (older scripts): the default --audio-buffer.
+    if (const char* ms = std::getenv("OP1EMU_AUDIO_MS")) {
+        const long v = std::strtol(ms, nullptr, 10);
+        if (v >= MiniaudioOutput::kMinBufferMs && v <= MiniaudioOutput::kMaxBufferMs) audioBufferMs = unsigned(v);
+    }
     bool help = false;
     bool options = true;
     std::string inputScript;
@@ -795,6 +800,12 @@ static int RunEmulator(int argc, char* argv[]) {
     cpuShouldStop.store(true);
     if (headless) { console->SetLockstep(false); console->OpenGate(); }
     cpuThread.join();
+    // OP1_DUMP_L1=PATH writes L1 instruction memory (decrypted code) at exit.
+    if (const char* dump = std::getenv("OP1_DUMP_L1")) {
+        std::vector<u8> l1(0x14000);
+        cpu->GetEmulator().MemoryRead(0xFFA00000, l1.data(), (int)l1.size());
+        std::ofstream(dump, std::ios::binary).write(reinterpret_cast<const char*>(l1.data()), l1.size());
+    }
     // OP1_DUMP_MEM=ADDR:LEN:PATH (hex ADDR/LEN) writes any guest range at exit.
     if (const char* spec = std::getenv("OP1_DUMP_MEM")) {
         char* end = nullptr;

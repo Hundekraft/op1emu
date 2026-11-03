@@ -53,6 +53,7 @@ protected:
     void ExecuteErase();
     u8 HandleReadID();
     void LoadPage(u32 pageNumber);
+    void LoadPageUntimed(u32 pageNumber);
     void SavePage(u32 pageNumber);
     u32 GetCurrentPage() const;
     u32 GetColumnAddress() const;
