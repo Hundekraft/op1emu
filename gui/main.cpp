@@ -10,6 +10,7 @@
 #include "boot_keys.h"
 #include "audio_output_miniaudio.h"
 #include "usbipd.h"
+#include "test_audio_input.h"
 #include "build_info.h"
 #ifdef ENABLE_PROFILING
 #include "profiling/profiler.h"
@@ -490,7 +491,20 @@ static int RunEmulator(int argc, char* argv[]) {
     // host sink. Avoid opening ALSA/PulseAudio devices on headless hosts.
     std::shared_ptr<MiniaudioOutput> audioOutput;
     if (!headless) audioOutput = std::make_shared<MiniaudioOutput>(audioBufferMs);
+    // OP1EMU_TEST_INPUT_HZ: a square wave at a quarter of full scale on SPORT0's input (sampler tests), instead
+    // of silence.
+    std::shared_ptr<TestAudioInput> audioInput;
+    if (const char* setting = std::getenv("OP1EMU_TEST_INPUT_HZ")) {
+        constexpr unsigned kRate = 44100;   // SPORT0's frame rate
+        char* end = nullptr;
+        const long hz = std::strtol(setting, &end, 10);
+        if (end == setting || *end || hz < 1 || hz > kRate / 2)
+            throw std::invalid_argument("OP1EMU_TEST_INPUT_HZ must be 1..22050");
+        audioInput = std::make_shared<TestAudioInput>(static_cast<unsigned>(hz), kRate);
+        LogInfo("Diagnostic SPORT0 input: %ld Hz square wave, quarter scale", hz);
+    }
     auto attachFrontends = [&]() {
+        if (audioInput) cpu->AttachAudioInput(audioInput);
         cpu->AttachDisplay(display);
         cpu->AttachKeyboard(keyboard);
         if (audioOutput) cpu->AttachAudioOutput(audioOutput);

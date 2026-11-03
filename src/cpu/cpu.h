@@ -49,6 +49,7 @@ class GPTimer;
 class USBDevice;
 class NandFlash;
 class Keyboard;
+class AudioInput;
 class MCP230XX;
 class ADXL345;
 class Potentiometer;
@@ -219,6 +220,7 @@ public:
     void AttachKeyboard(const std::shared_ptr<Keyboard>& keyboard);
     void AttachNandFlash(const std::shared_ptr<NandFlash>& nandFlash);
     void AttachAudioOutput(const std::shared_ptr<AudioOutput>& audioOutput);
+    void AttachAudioInput(const std::shared_ptr<AudioInput>& audioInput);
     void ReopenAudioDumps();    // fork-run: see SPORT::ReopenDump
     long AudioDumpBytes();      // sport0 dump size, see SPORT::DumpBytes
     uint64_t AudioDelivered();  // sport0 TX frames since DMA start

@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <string>
 #include "io.h"
 #include <cstring>
 
@@ -22,6 +24,19 @@ void MemoryDevice::BindFastMem(const std::shared_ptr<FastMem>& mem)
         memAddress = memory.data();
     }
     memset(memAddress, 0, size);
+    // OP1EMU_SDRAM_FILL=random|0xNN: SDRAM starts with a pattern instead of zeros, as a real unit's SDRAM after power-up
+    // or a warm restart, to find reads of memory nobody initialised (the boot ROM and LDR fill blocks still write theirs).
+    if (const char* fill = std::getenv("OP1EMU_SDRAM_FILL"); fill && name == "SDRAM") {
+        if (std::string(fill) == "random") {
+            uint32_t x = 0x9E3779B9u;
+            for (u32 i = 0; i + 4 <= size; i += 4) {
+                x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+                memcpy(memAddress + i, &x, 4);
+            }
+        } else {
+            memset(memAddress, (int)strtoul(fill, nullptr, 0), size);
+        }
+    }
 }
 
 void MemoryDevice::Read(u32 offset, void* buffer, u32 length)
