@@ -4,6 +4,7 @@
 
 #include "io.h"
 #include <functional>
+#include <deque>
 #include <queue>
 #include <mutex>
 #include <vector>
@@ -41,6 +42,8 @@ public:
     virtual void HandleSetupPacket(USBSetupBytes setup, const u8* data, std::size_t length, ReplyCallback callback) = 0;
     virtual void HandleDataWrite(int ep, int interval, const u8* data, std::size_t length, WriteDoneCallback callback) = 0;
     virtual void HandleDataRead(int ep, int interval, std::size_t limit, ReplyCallback callback) = 0;
+    // The host went away: forget the transfers it is still waiting for.
+    virtual void CancelPending() {}
     // The firmware has enabled the controller and connected to the bus (SOFT_CONN).
     // A host cannot enumerate the device before that: nothing answers its requests.
     virtual bool IsConnected() const { return true; }
@@ -68,6 +71,7 @@ struct USBEndpoint {
     std::vector<uint8_t> txBuffer;
     std::size_t txLimit = 0;
     USBDevice::ReplyCallback txCallback = nullptr;
+    std::deque<std::size_t> txShortEnds;   // txBuffer offsets just after each short packet (transfer ends)
     std::vector<uint8_t> rxBuffer;
     USBDevice::WriteDoneCallback rxCallback = nullptr;
 
@@ -109,6 +113,7 @@ public:
     void HandleSetupPacket(USBSetupBytes setup, const u8* data, std::size_t length, ReplyCallback callback) override;
     void HandleDataWrite(int ep, int interval, const u8* data, std::size_t length, WriteDoneCallback callback) override;
     void HandleDataRead(int ep, int interval, std::size_t limit, ReplyCallback callback) override;
+    void CancelPending() override;
 
     bool IsConnected() const override {
         return enabled.load(std::memory_order_relaxed) && connected.load(std::memory_order_relaxed);

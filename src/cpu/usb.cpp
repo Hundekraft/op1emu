@@ -434,6 +434,16 @@ void USB::HandleDataRead(int ep, int interval, std::size_t limit, ReplyCallback 
     HostRequested();
 }
 
+void USB::CancelPending() {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (auto& ep : endpoints) {
+        ep.txCallback = nullptr;
+        ep.rxCallback = nullptr;
+        ep.txShortEnds.clear();
+    }
+    setupCallback = nullptr;
+}
+
 void USB::ProcessTransfer() {
     if (!enabled) return;
     std::lock_guard<std::mutex> lock(mutex);
@@ -444,19 +454,33 @@ void USB::ProcessTransfer() {
         if ((epTxEnabled & (1 << i))) {
             ep.txBuffer.reserve(ep.txFifo.size() + ep.txBuffer.size());
             if (ep.dataPacketInFIFO) {
-                CountServiceWork(ep.txFifo.size());
+                const std::size_t packet = ep.txFifo.size();
+                CountServiceWork(packet);
                 while (!ep.txFifo.empty()) {
                     ep.txBuffer.push_back(ep.txFifo.front());
                     ep.txFifo.pop();
                 }
                 ep.dataPacketInFIFO = false;
                 epTxInterrupts |= (1 << i);
+                // A bulk/interrupt IN transfer ends at a short packet (USB 2.0 5.8.3), as on real USB: the host
+                // gets its reply without waiting for the whole length it asked for.
+                if (i != 0 && ep.txMaxPacketSize && packet < ep.txMaxPacketSize)
+                    ep.txShortEnds.push_back(ep.txBuffer.size());
             }
-            if (ep.txCallback && ep.txBuffer.size() >= ep.txLimit) {
-                CountServiceWork(ep.txLimit);
-                ep.txCallback(ep.txBuffer.data(), ep.txLimit);
-                ep.txBuffer.erase(ep.txBuffer.begin(), ep.txBuffer.begin() + ep.txLimit);
-                ep.txCallback = nullptr;
+            if (ep.txCallback) {
+                std::size_t n = 0;
+                bool done = false;
+                if (!ep.txShortEnds.empty() && ep.txShortEnds.front() <= ep.txLimit) { n = ep.txShortEnds.front(); done = true; }
+                else if (ep.txBuffer.size() >= ep.txLimit) { n = ep.txLimit; done = true; }
+                if (done) {
+                    CountServiceWork(n);
+                    ep.txCallback(ep.txBuffer.data(), n);
+                    ep.txBuffer.erase(ep.txBuffer.begin(), ep.txBuffer.begin() + n);
+                    ep.txCallback = nullptr;
+                    std::deque<std::size_t> rest;
+                    for (std::size_t e : ep.txShortEnds) if (e > n) rest.push_back(e - n);
+                    ep.txShortEnds.swap(rest);
+                }
             }
         }
         // Process RX endpoints

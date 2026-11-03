@@ -115,10 +115,15 @@ unsigned int USBIPServer::Port() const
 
 void USBIPServer::Detach(uvw::tcp_handle& client)
 {
-    std::lock_guard lock(mutex);
-    if (attached.get() != &client) return; // a list, a refused import, already detached
-    ++connection;
-    attached.reset();
+    {
+        std::lock_guard lock(mutex);
+        if (attached.get() != &client) return; // a list, a refused import, already detached
+        ++connection;
+        attached.reset();
+    }
+    // Its pending transfers would take the next client's data (outside our lock: the USB's comes first).
+    std::lock_guard devLock(deviceMutex);
+    if (device) device->CancelPending();
 }
 
 void USBIPServer::Close(uvw::tcp_handle& client)
