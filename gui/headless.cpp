@@ -260,6 +260,11 @@ void HeadlessFrontend::Execute(const std::string& line, Clock::time_point now) {
         frameTarget_ = FrameCount() + static_cast<uint64_t>(frames);
         frameDeadline_ = now + std::chrono::milliseconds(timeout);
         ArmGate(*frameTarget_);
+    } else if (command == "trace" && args.size() == 2) {
+        if (args[1].find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-_.") != std::string::npos)
+            throw std::runtime_error("Trace phase names use a-z, 0-9, '-', '_' and '.'");
+        if (traceHook_) traceHook_(args[1]);
+        LogInfo("Headless trace phase: %s", args[1].c_str());
     } else if (command == "audio-anchor" && args.size() == 1) {
         audioBase_ = AudioDelivered();
     } else if (command == "wait-audio" && (args.size() == 2 || args.size() == 3)) {

@@ -34,6 +34,8 @@ public:
 
     // Every command goes to this hook first (main.cpp: fork-run, dump-mem, and resuming the CPU a fork-run left
     // paused); true = handled.
+    // Script command "trace NAME": starts a trace phase (OP1EMU_TRACE_DIR); the host routes it to the CPU.
+    void SetTraceHook(const std::function<void(const std::string&)>& hook) { traceHook_ = hook; }
     void SetCommandHook(std::function<bool(const std::vector<std::string>&)> hook) { commandHook_ = std::move(hook); }
     // Read commands from fd from now on (a fork-run child switches to its flow script); pending input is dropped.
     void ReplaceInput(int fd);
@@ -69,6 +71,7 @@ private:
     using Pin = std::pair<int, int>;
     std::map<std::string, Pin> keys_;
     std::function<bool(const std::vector<std::string>&)> commandHook_;
+    std::function<void(const std::string&)> traceHook_;
     int inputFd_ = -1;
     bool eof_ = false;
     bool shouldClose_ = false;

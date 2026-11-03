@@ -2,6 +2,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include "bcore_memory.h"
+#include "trace.h"
+#include "cpu_state.h"
 #include "utils/log.h"
 #ifdef ENABLE_PROFILING
 #include "profiling/memory_census.h"
@@ -53,6 +55,7 @@ uint8_t EmulatorMemory::read8(uint32_t addr) const {
     PROFILE_ACCESS(addr, 0, false);
     bool hostWork, stable;
     const uint8_t value = emulator_.ReadAttended<uint8_t>(addr, hostWork, stable);
+    if (tracer_ && addr >= 0xFFC00000u) TraceMmr(addr, false, 1, value);
     Attend(hostWork);
     if (!stable && unstableReads_) ++*unstableReads_;
     return value;
@@ -62,6 +65,7 @@ uint16_t EmulatorMemory::read16(uint32_t addr) const {
     PROFILE_ACCESS(addr, 1, false);
     bool hostWork, stable;
     const uint16_t value = emulator_.ReadAttended<uint16_t>(addr, hostWork, stable);
+    if (tracer_ && addr >= 0xFFC00000u) TraceMmr(addr, false, 2, value);
     Attend(hostWork);
     if (!stable && unstableReads_) ++*unstableReads_;
     return value;
@@ -71,6 +75,7 @@ uint32_t EmulatorMemory::read32(uint32_t addr) const {
     PROFILE_ACCESS(addr, 2, false);
     bool hostWork, stable;
     const uint32_t value = emulator_.ReadAttended<uint32_t>(addr, hostWork, stable);
+    if (tracer_ && addr >= 0xFFC00000u) TraceMmr(addr, false, 4, value);
     Attend(hostWork);
     if (!stable && unstableReads_) ++*unstableReads_;
     return value;
@@ -79,6 +84,7 @@ uint32_t EmulatorMemory::read32(uint32_t addr) const {
 void EmulatorMemory::write8(uint32_t addr, uint8_t val) {
     PROFILE_ACCESS(addr, 0, true);
     bool hostWork;
+    if (tracer_ && addr >= 0xFFC00000u) TraceMmr(addr, true, 1, val);
     emulator_.WriteAttended<uint8_t>(addr, val, hostWork);
     if ((addr & 0xFFFFF000u) == 0xFFE00000u) cplbDirty_ = true;
     Attend(hostWork);
@@ -87,6 +93,7 @@ void EmulatorMemory::write8(uint32_t addr, uint8_t val) {
 void EmulatorMemory::write16(uint32_t addr, uint16_t val) {
     PROFILE_ACCESS(addr, 1, true);
     bool hostWork;
+    if (tracer_ && addr >= 0xFFC00000u) TraceMmr(addr, true, 2, val);
     emulator_.WriteAttended<uint16_t>(addr, val, hostWork);
     if ((addr & 0xFFFFF000u) == 0xFFE00000u) cplbDirty_ = true;
     Attend(hostWork);
@@ -95,6 +102,7 @@ void EmulatorMemory::write16(uint32_t addr, uint16_t val) {
 void EmulatorMemory::write32(uint32_t addr, uint32_t val) {
     PROFILE_ACCESS(addr, 2, true);
     bool hostWork;
+    if (tracer_ && addr >= 0xFFC00000u) TraceMmr(addr, true, 4, val);
     emulator_.WriteAttended<uint32_t>(addr, val, hostWork);
     if ((addr & 0xFFFFF000u) == 0xFFE00000u) cplbDirty_ = true;
     Attend(hostWork);
@@ -185,4 +193,8 @@ uint32_t EmulatorMemory::check_data_access(uint32_t pc, uint32_t addr, uint32_t 
         return UINT32_MAX;
     }
     return 0;
+}
+
+void EmulatorMemory::TraceMmr(uint32_t addr, bool write, unsigned width, uint32_t value) const {
+    tracer_->OnMmr(addr, write, width, value, traceCpu_->packets);
 }
