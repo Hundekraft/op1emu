@@ -5,6 +5,7 @@
 #include "time_source.h"
 #include <array>
 #include <set>
+#include <map>
 #include <unordered_map>
 #include <atomic>
 #include <memory>
@@ -41,6 +42,7 @@ class TWI;
 class USB;
 class CoreTimer;
 class Watchdog;
+class MemModel;
 class GPIO;
 class PPI;
 class Display;
@@ -369,6 +371,12 @@ protected:
     uint32_t lastRunPackets_ = 0;
     uint64_t lagLoggedNs_ = 0, statsRuns_ = 0, statsRunsAt_ = 0, statsHostNs_ = 0, statsGuestNs_ = 0;
     void PrintPcProfile();
+    // OP1EMU_INTERP_FIRST / OP1EMU_INTERP_VERIFY / OP1EMU_MEMMODEL (see the constructor).
+    uint32_t interpFirst_ = 0, interpLo_ = 0, interpHi_ = 0xFFFFFFFF, verifyLo_ = 0, verifyHi_ = 0;
+    std::unordered_map<uint32_t, uint32_t> interpVisits_;
+    uint64_t verifyOk_ = 0, verifyBad_ = 0;
+    std::unique_ptr<MemModel> memModel_;
+    void VerifyAgainst(u32 at, const bcore::CpuState& in, const std::map<uint32_t, uint8_t>& writes);
     // A block is running (Core::run): what a device access queues now was
     // not in the run's budget.
     bool inRun_ = false;

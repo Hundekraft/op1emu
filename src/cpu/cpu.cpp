@@ -9,6 +9,9 @@
 #include "sic.h"
 #include "coretimer.h"
 #include "watchdog.h"
+#include "interp.h"
+#include "memmodel.h"
+#include <map>
 #include "otp.h"
 #include "gptimer.h"
 #include "dma.h"
@@ -148,6 +151,25 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
     }
     panicLog_ = getenv("OP1_PANIC_LOG") != nullptr;
     pcProf_ = getenv("OP1EMU_PC_PROF") != nullptr;
+    // OP1EMU_INTERP_FIRST=N[,LO-HI]: block starts in [LO, HI) (hex) run on the interpreter the first N times;
+    // OP1EMU_INTERP_VERIFY=LO-HI: the interpreter runs each JIT block starting there on a copy, and the two are
+    // compared; OP1EMU_MEMMODEL=FILE: cache and SDRAM stall estimate of the interpreted code (memmodel.h).
+    if (const char* f = getenv("OP1EMU_INTERP_FIRST")) {
+        interpFirst_ = (uint32_t)strtoul(f, nullptr, 10);
+        if (const char* c = strchr(f, ',')) {
+            char* end = nullptr;
+            interpLo_ = (u32)strtoul(c + 1, &end, 16);
+            if (end && *end == '-') interpHi_ = (u32)strtoul(end + 1, nullptr, 16);
+        }
+    }
+    if (const char* v = getenv("OP1EMU_INTERP_VERIFY")) {
+        char* end = nullptr;
+        verifyLo_ = (u32)strtoul(v, &end, 16);
+        verifyHi_ = (end && *end == '-') ? (u32)strtoul(end + 1, nullptr, 16) : 0xFFFFFFFF;
+    }
+    if ((interpFirst_ || verifyHi_) && !Interpreter::Available())
+        LogError("OP1EMU_INTERP_FIRST / OP1EMU_INTERP_VERIFY: this build has no interpreter (OP1EMU_INTERP=OFF)");
+    if (const char* m = getenv("OP1EMU_MEMMODEL")) memModel_ = std::make_unique<MemModel>(m);
     cpuState_ = std::make_unique<bcore::CpuState>();
     memset(cpuState_.get(), 0, sizeof(bcore::CpuState));
 
@@ -460,6 +482,40 @@ void BlackFinCpu::InvalidateTranslations() {
 #endif
 }
 
+namespace {
+// User mode: no IPEND bit set but EMU and IRPTEN (bcore's cec_is_user_mode, which is not exported).
+bool UserMode(bcore::CpuState* cpu) {
+    return (bcore::cec_mmr_read(cpu, bcore::CEC_MMR_BASE + 4 * bcore::CEC_IDX_IPEND) & ~0x11u) == 0;
+}
+
+// OP1EMU_INTERP_VERIFY: reads see the emulator's memory plus this run's own writes; writes stay here.
+class OverlayMemory : public bcore::Memory {
+public:
+    explicit OverlayMemory(bcore::Memory* base) : base_(base) {}
+    uint32_t base() const override { return 0; }
+    uint32_t size() const override { return 0xFFFFFFFF; }
+    uintptr_t fast_base() const override { return 0; }
+    uint8_t read8(uint32_t a) const override {
+        if (a >= 0xFFC00000u) { mmr_ = true; return 0; }   // never touch devices from the check
+        auto it = w_.find(a);
+        return it != w_.end() ? it->second : base_->read8(a);
+    }
+    uint16_t read16(uint32_t a) const override { return (uint16_t)(read8(a) | read8(a + 1) << 8); }
+    uint32_t read32(uint32_t a) const override { return (uint32_t)read16(a) | (uint32_t)read16(a + 2) << 16; }
+    void write8(uint32_t a, uint8_t v) override { if (a >= 0xFFC00000u) mmr_ = true; w_[a] = v; }
+    void write16(uint32_t a, uint16_t v) override { write8(a, (uint8_t)v); write8(a + 1, (uint8_t)(v >> 8)); }
+    void write32(uint32_t a, uint32_t v) override { write16(a, (uint16_t)v); write16(a + 2, (uint16_t)(v >> 16)); }
+    const uint8_t* raw() const override { return nullptr; }
+    uint32_t rawmem_limit() const override { return 0; }
+    bool touchedMmr() const { return mmr_; }
+    const std::map<uint32_t, uint8_t>& writes() const { return w_; }
+private:
+    bcore::Memory* base_;
+    std::map<uint32_t, uint8_t> w_;
+    mutable bool mmr_ = false;
+};
+}  // namespace
+
 HaltReason BlackFinCpu::Run() {
     // OP1EMU_STATS: guest seconds per host second and host returns, every 5 s of host time.
     static const bool stats = getenv("OP1EMU_STATS") != nullptr;
@@ -526,9 +582,36 @@ HaltReason BlackFinCpu::Run() {
 #endif
     // Execute one basic block — bcore updates cpuState_->pc internally.
     // Hardware loops, PC advance, and hwloop counters are all handled by bcore.
+    // OP1EMU_INTERP_FIRST: this block on the interpreter instead (a few instructions, to a change of flow).
+    bool interpreted = false;
+    if (interpFirst_) {
+        const u32 pc0 = cpuState_->pc;
+        if (pc0 >= interpLo_ && pc0 < interpHi_ && interpVisits_[pc0]++ < interpFirst_) {
+            if (memModel_) {
+                memModel_->BeginBlock(pc0, time_.Cycles());
+                Interpreter::SetTrace(&MemModel::Trace, memModel_.get());
+            }
+            const uint32_t steps = Interpreter::Run(cpuState_.get(), bcoreMemory_.get(), UserMode(cpuState_.get()), 256);
+            if (memModel_) Interpreter::SetTrace(nullptr, nullptr);
+            interpreted = steps != 0;
+            if (interpreted) { cpuState_->chain_packets = 0; cpuState_->chain_blocks = 0; cpuState_->idle = 0; }
+        }
+    }
+    // OP1EMU_INTERP_VERIFY: the interpreter on a copy first; compared after the JIT ran the same block.
+    std::unique_ptr<bcore::CpuState> verifyState;
+    std::unique_ptr<OverlayMemory> verifyMem;
+    uint32_t verifySteps = 0;
+    const u32 verifyPc = cpuState_->pc;
+    if (verifyHi_ && verifyPc >= verifyLo_ && verifyPc < verifyHi_ && !interpreted) {
+        verifyState = std::make_unique<bcore::CpuState>(*cpuState_);
+        verifyMem = std::make_unique<OverlayMemory>(bcoreMemory_.get());
+        verifySteps = Interpreter::Run(verifyState.get(), verifyMem.get(), UserMode(cpuState_.get()), 256);
+    }
     inRun_ = true;
-    const bool ran = core_->run(cpuState_->pc);
+    const bool ran = interpreted || core_->run(cpuState_->pc);
     inRun_ = false;
+    if (verifySteps && !verifyMem->touchedMmr() && verifyState->pc == cpuState_->pc)
+        VerifyAgainst(verifyPc, *verifyState, verifyMem->writes());
     if (!ran) {
         // Translation/JIT failure: PC is unchanged, so retrying would loop
         // forever. Skip device processing and let the host stop the run.
@@ -852,6 +935,7 @@ bool BlackFinCpu::OffThreadWork() {
 }
 
 void BlackFinCpu::SetChaining(bool chaining, bool dry) {
+    if (chaining && (interpFirst_ || verifyHi_)) chaining = false;   // they look at every block start
     if (chaining && (panicLog_ || !breakPcs_.empty())) {
         LogInfo("OP1EMU_BREAK / OP1_PANIC_LOG: blocks return to the host after each one (no chaining)");
         chaining = false;
@@ -1523,4 +1607,26 @@ void BlackFinCpu::PrintPcProfile() {
                 100.0 * v[i].second.ns / (total ? total : 1), (unsigned long long)v[i].second.runs,
                 (unsigned long long)v[i].second.packets);
     pcProfile_.clear();
+}
+
+void BlackFinCpu::VerifyAgainst(u32 at, const bcore::CpuState& in, const std::map<uint32_t, uint8_t>& writes) {
+    const bcore::CpuState& j = *cpuState_;
+    std::string diff;
+    char b[96], name[8];
+    auto cmp = [&](const char* n, uint32_t a, uint32_t c) {
+        if (a != c) { snprintf(b, sizeof b, " %s interp=%08x jit=%08x", n, a, c); diff += b; }
+    };
+    for (int i = 0; i < 16; ++i) { snprintf(name, sizeof name, "%s%d", i < 8 ? "R" : "P", i < 8 ? i : i - 8); cmp(name, in.dpregs[i], j.dpregs[i]); }
+    for (int i = 0; i < 4; ++i) { cmp("I", in.iregs[i], j.iregs[i]); cmp("M", in.mregs[i], j.mregs[i]); cmp("B", in.bregs[i], j.bregs[i]); cmp("L", in.lregs[i], j.lregs[i]); }
+    for (int i = 0; i < 2; ++i) { cmp("AX", in.ax[i], j.ax[i]); cmp("AW", in.aw[i], j.aw[i]); cmp("LC", in.lc[i], j.lc[i]); cmp("LT", in.lt[i], j.lt[i]); cmp("LB", in.lb[i], j.lb[i]); }
+    cmp("ASTAT", bcore::astat_compose(&in), bcore::astat_compose(&j));
+    cmp("RETS", in.rets, j.rets);
+    for (const auto& [a, v] : writes) {
+        const uint8_t real = emulator.MemoryRead8(a);
+        if (real != v) { snprintf(b, sizeof b, " [%08x] interp=%02x jit=%02x", a, v, real); diff += b; }
+    }
+    if (diff.empty()) { ++verifyOk_; return; }
+    ++verifyBad_;
+    static std::set<u32> seen;
+    if (seen.insert(at).second) LogInfo("VERIFY mismatch block %#x:%s", at, diff.c_str());
 }

@@ -186,6 +186,35 @@ if(ENABLE_PROFILING)
     target_link_libraries(emulator PRIVATE nlohmann_json::nlohmann_json)
 endif()
 
+# Interpreter (OP1EMU_INTERP_FIRST, OP1EMU_INTERP_VERIFY, OP1EMU_MEMMODEL) on the GDB Blackfin simulator.
+# ext/bfin_sim is GPL: with this ON the op1emu binary combines MIT and GPL code.
+option(OP1EMU_INTERP "Interpreter for chosen code and the memory model, on ext/bfin_sim (links GPL code)" ON)
+if(OP1EMU_INTERP AND NOT EMSCRIPTEN)
+    enable_language(C)
+    # A patched copy (src/cpu/bfin-sim-op1emu.patch: flag fixes so the interpreter agrees with the JIT);
+    # the submodule stays as upstream has it.
+    set(_bfinsim_dir ${CMAKE_CURRENT_BINARY_DIR}/bfinsim)
+    file(MAKE_DIRECTORY ${_bfinsim_dir})
+    add_custom_command(
+        OUTPUT ${_bfinsim_dir}/bfin-sim.c
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/ext/bfin_sim/bfin-sim.c ${_bfinsim_dir}/bfin-sim.c
+        COMMAND patch -s -p0 -d ${_bfinsim_dir} -i ${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/bfin-sim-op1emu.patch
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ext/bfin_sim/bfin-sim.c ${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/bfin-sim-op1emu.patch
+        COMMENT "Patching bfin-sim.c"
+        VERBATIM)
+    add_library(bfinsim STATIC ${_bfinsim_dir}/bfin-sim.c src/cpu/interp_glue.c)
+    target_include_directories(bfinsim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ext/bfin_sim src/cpu)
+    target_compile_options(bfinsim PRIVATE -w)
+    # Keep the simulator's C names apart from anything else that links.
+    foreach(sym cec_cli cec_sti cec_exception cec_hwerr cec_latch cec_pop_reti cec_push_reti cec_return
+                cec_is_user_mode cec_require_supervisor mmu_check_addr mmu_check_cache_addr mmu_process_fault
+                bfin_trace_queue sim_core_read_buffer sim_core_write_buffer interp_insn_bfin hwloop_get_next_pc)
+        target_compile_definitions(bfinsim PRIVATE ${sym}=bfsim_${sym})
+    endforeach()
+    target_link_libraries(emulator PRIVATE bfinsim)
+    target_compile_definitions(emulator PRIVATE OP1EMU_INTERP=1)
+endif()
+
 if(EMSCRIPTEN)
     add_subdirectory(web)
     return()
