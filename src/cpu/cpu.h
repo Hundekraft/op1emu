@@ -4,6 +4,7 @@
 #include "realtime_pacer.h"
 #include "time_source.h"
 #include <array>
+#include <set>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -336,6 +337,14 @@ protected:
 #endif
     uint8_t idleWake_ = 0;  // SIC::Wakeup(), for generated code (CpuState::idle_wake)
     bool chaining_ = false;
+    // Debug aids (environment, see the constructor): they look at every block's start, so they turn
+    // chaining off.
+    std::set<u32> breakPcs_;
+    unsigned breakHitsLeft_ = 4, breakHit_ = 0;
+    bool panicLog_ = false;
+    void OnBreak();
+    void ApplyOverlay();
+    void DebugBeforeRun();
     // A block is running (Core::run): what a device access queues now was
     // not in the run's budget.
     bool inRun_ = false;
