@@ -42,7 +42,7 @@ public:
     virtual void HandleSetupPacket(USBSetupBytes setup, const u8* data, std::size_t length, ReplyCallback callback) = 0;
     virtual void HandleDataWrite(int ep, int interval, const u8* data, std::size_t length, WriteDoneCallback callback) = 0;
     virtual void HandleDataRead(int ep, int interval, std::size_t limit, ReplyCallback callback) = 0;
-    // The host went away: forget the transfers it is still waiting for.
+    // The host went away: forget the data transfers it is still waiting for (not EP0's).
     virtual void CancelPending() {}
     // The firmware has enabled the controller and connected to the bus (SOFT_CONN).
     // A host cannot enumerate the device before that: nothing answers its requests.

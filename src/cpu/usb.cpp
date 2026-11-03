@@ -441,7 +441,7 @@ void USB::CancelPending() {
         ep.rxCallback = nullptr;
         ep.txShortEnds.clear();
     }
-    setupCallback = nullptr;
+    // EP0 stays: the server reads descriptors over it for itself, and drops a stale answer by connection.
 }
 
 void USB::ProcessTransfer() {
