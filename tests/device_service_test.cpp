@@ -951,7 +951,7 @@ static void SportTransmitDeliversTheBuffer(u32 modify) {
 // The OP-1's codec link: SPORT0 with the secondary channels on (TXSE, RXSE),
 // 32-bit words, no stereo frame sync. A frame is a primary word and a
 // secondary word, interleaved in memory, at the codec's 44.1 kHz: one second
-// of guest time moves SPORT::DefaultRateHz() (22050 or OP1EMU_SPORT_HZ) two-word frames each way, and the sink gets the
+// of guest time moves SPORT::DefaultRateHz() (44100 or OP1EMU_SPORT_HZ) two-word frames each way, and the sink gets the
 // buffer's words in order, two to a frame.
 static void SportSecondaryChannelsFrameTwoWords() {
     AudioRig rig;

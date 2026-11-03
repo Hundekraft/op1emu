@@ -8,7 +8,7 @@
 
 uint32_t SPORT::DefaultRateHz() {
     static const uint32_t rate = [] {
-        uint32_t hz = 22050;
+        uint32_t hz = 44100;
         if (const char* v = std::getenv("OP1EMU_SPORT_HZ")) {
             const long parsed = std::strtol(v, nullptr, 10);
             if (parsed >= 8000 && parsed <= 192000) hz = static_cast<uint32_t>(parsed);

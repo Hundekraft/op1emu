@@ -46,9 +46,9 @@ public:
     uint64_t TxDelivered() const { return totalTxSamplesDelivered_; }
     static inline std::function<void(uint64_t)> txHook;
 
-    // The frame rate: 22050 two-word frames/s, as our fork has always run SPORT0, until a device measurement
-    // settles it against upstream's 44100 (OP1-Emulator docs/upstream-sync-2026-11.md, "SPORT0 rate");
-    // OP1EMU_SPORT_HZ picks another (44100 is upstream's).
+    // The frame rate: 44100 two-word frames/s. Measured 2026-11-03: R246's metronome at 125 BPM clicks every
+    // 21,168 frames (0.48 s x 44100), and the unit's pitch agrees (OP1-Emulator docs/upstream-sync-2026-11.md,
+    // "SPORT0 rate"). OP1EMU_SPORT_HZ picks another (22050 is what the fork ran before).
     static uint32_t DefaultRateHz();
     uint32_t RateHz() const { return sampleRateHz_; }
 
