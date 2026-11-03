@@ -210,6 +210,9 @@ public:
     void AttachKeyboard(const std::shared_ptr<Keyboard>& keyboard);
     void AttachNandFlash(const std::shared_ptr<NandFlash>& nandFlash);
     void AttachAudioOutput(const std::shared_ptr<AudioOutput>& audioOutput);
+    void ReopenAudioDumps();    // fork-run: see SPORT::ReopenDump
+    long AudioDumpBytes();      // sport0 dump size, see SPORT::DumpBytes
+    uint64_t AudioDelivered();  // sport0 TX frames since DMA start
     void SetAcceleration(int16_t x, int16_t y, int16_t z);
     void SetPotentiometerValue(u8 value);
 

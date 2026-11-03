@@ -7,6 +7,7 @@
 #include <optional>
 #include <functional>
 #include <cstdint>
+#include <cstdio>
 
 class TimeSource;
 
@@ -34,6 +35,16 @@ public:
         NotifyDMA();
         RegisterDevice::Write32(offset, value);
     }
+
+    // OP1EMU_AUDIO_DUMP=DIR: SPORT TX frames as the DMA moves them, raw, to DIR/sport<N>.raw (opened at the
+    // first TX transfer). ReopenDump closes it and, if one was open, opens it again under the variable's
+    // current value (a fork-run child writes its own audio). DumpBytes: its size so far (flushed), -1 without.
+    void ReopenDump();
+    long DumpBytes();
+    // TX frames delivered since DMA start, and a hook called on the CPU thread after each SPORT0 delivery
+    // (the headless audio gate, wait-audio). The hook may block the CPU thread.
+    uint64_t TxDelivered() const { return totalTxSamplesDelivered_; }
+    static inline std::function<void(uint64_t)> txHook;
 
     // Audio callbacks
     void SetAudioOutputCallback(AudioOutputCallback callback) { audioOutputCallback = callback; }
@@ -105,4 +116,7 @@ protected:
     // Frames per second. The OP-1's codec masters the link (its clocks are
     // not SPORT's TCLKDIV/TFSDIV) at 44.1 kHz.
     uint32_t sampleRateHz_ = 44100;
+
+    FILE* dump_ = nullptr;
+    void OpenDump();
 };

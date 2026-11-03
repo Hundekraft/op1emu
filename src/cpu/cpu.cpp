@@ -1255,6 +1255,19 @@ void BlackFinCpu::AttachAudioOutput(const std::shared_ptr<AudioOutput>& audioOut
     sport1->SetAudioOutputCallback(cb);
 }
 
+void BlackFinCpu::ReopenAudioDumps() {
+    if (sport0) sport0->ReopenDump();
+    if (sport1) sport1->ReopenDump();
+}
+
+long BlackFinCpu::AudioDumpBytes() {
+    return sport0 ? sport0->DumpBytes() : -1;
+}
+
+uint64_t BlackFinCpu::AudioDelivered() {
+    return sport0 ? sport0->TxDelivered() : 0;
+}
+
 void BlackFinCpu::SetAcceleration(int16_t x, int16_t y, int16_t z) {
     QueueEvent([this, x, y, z]() {
         this->adxl345->SetAcceleration(x, y, z);

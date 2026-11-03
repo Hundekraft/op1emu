@@ -2,7 +2,9 @@
 #include "emu.h"
 #include "time_source.h"
 #include "utils/log.h"
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 enum DataFormat {
     NORMAL = 0,
@@ -212,15 +214,50 @@ u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
         dmaTxStartNs_ = time_.Nanoseconds();
         totalTxSamplesDelivered_ = 0;
         dmaTxActive_ = true;
+        LogInfo("SPORT%d TX DMA start: wordlen=%d stereo=%d secondary=%d", sportNumber, transmitWordLength,
+                transmitStereoFrameSync, transmitSecondaryEnabled);
+        if (!dump_) OpenDump();
     }
 
     uint64_t available = TxAvailable(requestedSamples);
     if (available == 0) return 0;  // Not time yet — DMA retries next cycle
+
+    if (dump_) fwrite(source, frameSize, available, dump_);
 
     if (audioOutputCallback) {
         audioOutputCallback(source, available, channels, bitsPerSample, transmitStereoFrameSync);
     }
 
     totalTxSamplesDelivered_ += available;
+    if (sportNumber == 0 && txHook) txHook(totalTxSamplesDelivered_);
+    static const bool rateLog = getenv("OP1EMU_SPORT_RATE") != nullptr;   // debug: frames per guest second
+    if (rateLog && totalTxSamplesDelivered_ / sampleRateHz_ != (totalTxSamplesDelivered_ - available) / sampleRateHz_)
+        LogInfo("SPORT%d TX: %llu frames at guest %.3f s since DMA start", sportNumber,
+                (unsigned long long)totalTxSamplesDelivered_, (time_.Nanoseconds() - dmaTxStartNs_) / 1e9);
     return static_cast<u32>(available * frameSize);
+}
+
+void SPORT::OpenDump()
+{
+    const char* d = std::getenv("OP1EMU_AUDIO_DUMP");
+    if (!d) return;
+    const std::string path = std::string(d) + "/sport" + std::to_string(sportNumber) + ".raw";
+    dump_ = std::fopen(path.c_str(), "wb");
+    if (dump_) LogInfo("SPORT%d: dumping TX samples to %s from guest_ns=%llu", sportNumber, path.c_str(),
+                       (unsigned long long)time_.Nanoseconds());
+}
+
+void SPORT::ReopenDump()
+{
+    if (!dump_) return;
+    std::fclose(dump_);
+    dump_ = nullptr;
+    OpenDump();
+}
+
+long SPORT::DumpBytes()
+{
+    if (!dump_) return -1;
+    std::fflush(dump_);
+    return std::ftell(dump_);
 }
