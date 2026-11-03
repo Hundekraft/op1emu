@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "nand.h"
 #include "mmr.h"
 #include <cstring>
@@ -146,6 +147,13 @@ u32 NFC::DMAWrite(int x, int y, const void* source, u32 length)
     return len;
 }
 
+// OP1EMU_NAND_LEGACY_ECC=1: the ECC op1emu computed before 580a929 (P2' never set, P2 the parity of every bit), for
+// NAND images written by such a build without migrating them (tools/nand_ecc_migrate.py in OP1-Emulator fixes one).
+static const bool kLegacyEcc = [] {
+    const char* v = std::getenv("OP1EMU_NAND_LEGACY_ECC");
+    return v && *v && *v != '0';
+}();
+
 static std::tuple<u16, u16> ComputeEccPair(const u8* data, u32 length, u32 bytePos) {
     u8 p1 = 0, p1p = 0, p2 = 0, p2p = 0, p4 = 0, p4p = 0;
     u8 lp[8] = {0};
@@ -158,6 +166,7 @@ static std::tuple<u16, u16> ComputeEccPair(const u8* data, u32 length, u32 byteP
             if (pos & 0x1) p1 ^= bit;
             else           p1p ^= bit;
             if (pos & 0x2) p2 ^= bit;
+            else if (kLegacyEcc) p2 ^= bit;
             else           p2p ^= bit;
             if (pos & 0x4) p4 ^= bit;
             else           p4p ^= bit;

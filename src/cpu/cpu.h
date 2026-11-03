@@ -5,6 +5,7 @@
 #include "time_source.h"
 #include <array>
 #include <set>
+#include <unordered_map>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -360,6 +361,13 @@ protected:
     void OnBreak();
     void ApplyOverlay();
     void DebugBeforeRun();
+    // OP1EMU_PC_PROF: host time, runs and packets per run entry pc, the top ones printed every 20 s of host time.
+    bool pcProf_ = false;
+    struct PcProf { uint64_t ns = 0, runs = 0, packets = 0; };
+    std::unordered_map<uint32_t, PcProf> pcProfile_;
+    uint64_t pcProfPrintNs_ = 0;
+    uint32_t lastRunPackets_ = 0;
+    void PrintPcProfile();
     // A block is running (Core::run): what a device access queues now was
     // not in the run's budget.
     bool inRun_ = false;

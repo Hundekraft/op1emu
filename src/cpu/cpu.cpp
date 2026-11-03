@@ -147,6 +147,7 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
         if (const char* c = strchr(b, ',')) breakHitsLeft_ = strtoul(c + 1, nullptr, 10);
     }
     panicLog_ = getenv("OP1_PANIC_LOG") != nullptr;
+    pcProf_ = getenv("OP1EMU_PC_PROF") != nullptr;
     cpuState_ = std::make_unique<bcore::CpuState>();
     memset(cpuState_.get(), 0, sizeof(bcore::CpuState));
 
@@ -433,6 +434,22 @@ void BlackFinCpu::InvalidateTranslations() {
 }
 
 HaltReason BlackFinCpu::Run() {
+    if (pcProf_) {
+        const uint32_t entry = cpuState_->pc;
+        const auto t0 = std::chrono::steady_clock::now();
+        pcProf_ = false;
+        const HaltReason r = Run();
+        pcProf_ = true;
+        auto& e = pcProfile_[entry];
+        const uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        e.ns += now - std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count();
+        e.runs += 1;
+        e.packets += lastRunPackets_;
+        if (!pcProfPrintNs_) pcProfPrintNs_ = now;
+        if (now - pcProfPrintNs_ > 20'000'000'000ull) { PrintPcProfile(); pcProfPrintNs_ = now; }
+        return r;
+    }
     // Events queued from this thread from now on are timed in guest time.
     if (cpuThread_.load(std::memory_order_relaxed) != std::this_thread::get_id())
         cpuThread_.store(std::this_thread::get_id(), std::memory_order_relaxed);
@@ -488,6 +505,7 @@ HaltReason BlackFinCpu::Run() {
     cpuState_->chain_packets = 0;
     cpuState_->chain_blocks = 0;
     time_.Retire(packets);
+    lastRunPackets_ = packets;
 #ifdef ENABLE_PROFILING
     if (profiler_) profiler_->AfterRun(blockPc, packets, chained);
     CountChain(budget, packets, chained, accessStops);
@@ -1425,4 +1443,18 @@ void BlackFinCpu::ApplyOverlay() {
         }
     }
     LogInfo("overlay: applied %u entries from %s", n, path);
+}
+
+void BlackFinCpu::PrintPcProfile() {
+    std::vector<std::pair<uint32_t, PcProf>> v(pcProfile_.begin(), pcProfile_.end());
+    std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+    uint64_t total = 0, runs = 0, packets = 0;
+    for (const auto& e : v) { total += e.second.ns; runs += e.second.runs; packets += e.second.packets; }
+    fprintf(stderr, "pc profile: %.1f ms, %llu runs, %llu packets, guest %.3f s\n", total / 1e6,
+            (unsigned long long)runs, (unsigned long long)packets, time_.Nanoseconds() / 1e9);
+    for (size_t i = 0; i < v.size() && i < 25; ++i)
+        fprintf(stderr, "  %#010x %9.1f ms %5.1f%% %10llu runs %12llu packets\n", v[i].first, v[i].second.ns / 1e6,
+                100.0 * v[i].second.ns / (total ? total : 1), (unsigned long long)v[i].second.runs,
+                (unsigned long long)v[i].second.packets);
+    pcProfile_.clear();
 }
