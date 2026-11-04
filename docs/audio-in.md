@@ -10,9 +10,14 @@ Plays a WAV file into the codec's ADC, so input engines (vocoder, pitch correcti
 
 Path: SPORT0 RX (DMA2), the only RX in use. SPORT0 is I2S with 32-bit words and a stereo frame sync, so each frame is
 two int32 words (L, R). R246 sums the two words and keeps the high half as the mono input sample
-(`input_mono_buf`). The option writes `sample * 32768` (the 16-bit value in the high half, shifted down one bit, so
-L + R is the original level) into both words. The codec is not modelled: the mic and line choices only change codec
+(`input_mono_buf`). The option writes `sample * 32768` (half scale in each word, so R246's w0 + w1 sum has the file's 16-bit value in its high half) into both words. The codec is not modelled: the mic and line choices only change codec
 registers (and the mic boost of the firmware, +10 dB when set), not this data, so both selections see the file. Without
 the option RX is silence, as before. Input source 3 (USB audio) uses a different buffer and is not fed.
 
 Frame k of the RX stream is due at the RX DMA start + k / rate and reads file frame `k + floor(rx_start * rate) - START * rate`.
+
+When the file is not looping, the log says `SPORT audio in: file starts/ends at guest X s` (RX stream guest time).
+
+Check without a monitored output: `dump-mem ff800cb4 80 buf.bin` (headless command) reads R246's `input_mono_buf`
+(64 x int16). A 440 Hz, 0.5 full-scale sine arrives there at amplitude 16383, 440 Hz, residual 0.4 rms. The tone is not
+heard in the SPORT0 TX dump in tape or synth mode without more input routing; this was not pursued.

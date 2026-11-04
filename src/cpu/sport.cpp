@@ -264,6 +264,10 @@ u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
             int32_t x = 0;
             if (in->loop && n) { k %= n; if (k < 0) k += n; }
             if (k >= 0 && k < n) x = in->mono[size_t(k)];
+            if (!in->loop && (k == 0 || k == n)) {   // the file's edges, in this stream's guest time
+                const double g = dmaRxStartNs_ / 1e9 + double(totalRxSamplesDelivered_ + i) / sampleRateHz_;
+                LogInfo("SPORT audio in: file %s at guest %.4f s", k == 0 ? "starts" : "ends", g);
+            }
             for (int c = 0; c < channels; c++) {
                 uint8_t* w = static_cast<uint8_t*>(dest) + i * frameSize + size_t(c) * (bitsPerSample > 16 ? 4 : 2);
                 if (bitsPerSample > 16) { int32_t v = x * 32768; std::memcpy(w, &v, 4); }
