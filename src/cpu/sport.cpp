@@ -4,6 +4,9 @@
 #include "utils/log.h"
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 uint32_t SPORT::DefaultRateHz() {
@@ -20,6 +23,69 @@ uint32_t SPORT::DefaultRateHz() {
     return rate;
 }
 
+
+// OP1EMU_AUDIO_IN=<file.wav>: frames played into SPORT0's RX data (the codec ADC), see docs/audio-in.md.
+// OP1EMU_AUDIO_IN_START=<guest seconds> (default 0), OP1EMU_AUDIO_IN_LOOP=1.
+struct AudioIn {
+    std::vector<int16_t> mono;   // one sample per frame (stereo files are averaged)
+    int64_t startFrames = 0;     // guest time of file frame 0, in SPORT frames
+    bool loop = false;
+};
+
+static const AudioIn* LoadAudioIn(uint32_t rateHz) {
+    static const AudioIn* in = [rateHz]() -> const AudioIn* {
+        const char* path = std::getenv("OP1EMU_AUDIO_IN");
+        if (!path || !*path) return nullptr;
+        auto fail = [&](const char* why) -> const AudioIn* {
+            std::fprintf(stderr, "OP1EMU_AUDIO_IN %s: %s\n", path, why);
+            std::exit(2);
+        };
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return fail("cannot open");
+        std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        auto u16 = [&](size_t o) { return uint32_t(b[o]) | uint32_t(b[o + 1]) << 8; };
+        auto u32 = [&](size_t o) { return u16(o) | u16(o + 2) << 16; };
+        if (b.size() < 12 || std::memcmp(b.data(), "RIFF", 4) || std::memcmp(b.data() + 8, "WAVE", 4))
+            return fail("not a RIFF/WAVE file");
+        uint32_t fmt = 0, ch = 0, rate = 0, bits = 0, dataOff = 0, dataLen = 0;
+        for (size_t o = 12; o + 8 <= b.size();) {
+            const uint32_t len = u32(o + 4);
+            if (!std::memcmp(&b[o], "fmt ", 4) && len >= 16 && o + 8 + 16 <= b.size()) {
+                fmt = u16(o + 8); ch = u16(o + 10); rate = u32(o + 12); bits = u16(o + 22);
+            } else if (!std::memcmp(&b[o], "data", 4)) {
+                dataOff = uint32_t(o + 8);
+                dataLen = uint32_t(std::min<uint64_t>(len, b.size() - dataOff));
+                break;
+            }
+            o += 8 + size_t(len) + (len & 1);
+        }
+        if (fmt == 0xFFFE && bits == 16) fmt = 1;   // extensible with 16-bit samples: assume PCM
+        if (fmt != 1 || bits != 16) return fail("must be 16-bit PCM");
+        if (ch != 1 && ch != 2) return fail("must be mono or stereo");
+        if (rate != rateHz) {
+            std::fprintf(stderr, "OP1EMU_AUDIO_IN %s: sample rate %u Hz, but SPORT runs %u Hz (must match)\n", path, rate, rateHz);
+            std::exit(2);
+        }
+        if (!dataOff) return fail("no data chunk");
+        auto* a = new AudioIn;
+        const size_t frames = dataLen / (2 * ch);
+        a->mono.resize(frames);
+        for (size_t i = 0; i < frames; i++) {
+            int sum = 0;
+            for (uint32_t c = 0; c < ch; c++) sum += int16_t(u16(dataOff + (i * ch + c) * 2));
+            a->mono[i] = int16_t(sum / int(ch));
+        }
+        double start = 0;
+        if (const char* v = std::getenv("OP1EMU_AUDIO_IN_START")) start = std::atof(v);
+        a->startFrames = int64_t(start * rateHz + 0.5);
+        const char* l = std::getenv("OP1EMU_AUDIO_IN_LOOP");
+        a->loop = l && *l && std::strcmp(l, "0") != 0;
+        LogInfo("SPORT audio in: %s, %zu frames, start guest %.3f s%s", path, frames, start, a->loop ? ", looping" : "");
+        return a;
+    }();
+    return in;
+}
+
 enum DataFormat {
     NORMAL = 0,
     COMPANDING_U_LAW = 2,
@@ -30,6 +96,7 @@ constexpr std::size_t FIFO_SIZE = 8; // 8x16-bit words or 4x32-bit words
 
 SPORT::SPORT(u32 baseAddr, int sportNum, const TimeSource& time)
     : RegisterDevice("SPORT" + std::to_string(sportNum), baseAddr, 0x60), sportNumber(sportNum), time_(time) {
+    if (sportNum == 0) LoadAudioIn(sampleRateHz_);   // fail at start, not at the first RX transfer
 
     REG32(SPORT_TCR1, 0x00);
     FIELD(SPORT_TCR1, TSPEN, 0, 1, R(transmitEnabled), W(transmitEnabled));
@@ -183,6 +250,28 @@ u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
         size_t read = audioInputCallback(dest, available, channels, bitsPerSample);
         totalRxSamplesDelivered_ += read;
         return static_cast<u32>(read * frameSize);
+    }
+
+    if (sportNumber == 0)
+    if (const AudioIn* in = LoadAudioIn(sampleRateHz_)) {
+        // Frame k of this RX stream is due at dmaRxStartNs_ + k / rate; the file's frame 0 is at guest startFrames.
+        // Both L and R words carry sample/2 (R246 mono-sums w0 + w1 and takes the high half: unity).
+        const int64_t base = int64_t(dmaRxStartNs_ * (unsigned __int128)sampleRateHz_ / 1'000'000'000ULL)
+                             - in->startFrames + int64_t(totalRxSamplesDelivered_);
+        const int64_t n = int64_t(in->mono.size());
+        for (size_t i = 0; i < available; i++) {
+            int64_t k = base + int64_t(i);
+            int32_t x = 0;
+            if (in->loop && n) { k %= n; if (k < 0) k += n; }
+            if (k >= 0 && k < n) x = in->mono[size_t(k)];
+            for (int c = 0; c < channels; c++) {
+                uint8_t* w = static_cast<uint8_t*>(dest) + i * frameSize + size_t(c) * (bitsPerSample > 16 ? 4 : 2);
+                if (bitsPerSample > 16) { int32_t v = x * 32768; std::memcpy(w, &v, 4); }
+                else { int16_t v = int16_t(x / 2); std::memcpy(w, &v, 2); }
+            }
+        }
+        totalRxSamplesDelivered_ += available;
+        return static_cast<u32>(available * frameSize);
     }
 
     // Fill with silence: dest is the DMA's staging buffer, which holds
