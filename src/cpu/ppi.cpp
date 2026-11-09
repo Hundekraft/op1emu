@@ -35,7 +35,9 @@ PPI::PPI(u32 baseAddr) : RegisterDevice("PPI", baseAddr, 0x14) {
     FIELD(PPI_CONTROL, DLEN, 11, 3, R(dataLength), W(dataLength));
     PPI_CONTROL.writeCallback = [this](u32 value) {
         if (enabled) {
-            display->Initialize(rowCount + 1, lineCount);
+            // PACK_EN with 8-bit data: two samples a 16-bit DMA word (R246's 156 x 320 panel variant A)
+            const int samples = rowCount + 1;
+            display->Initialize(packingEnabled && dataLength == PPI_DATALEN_8 ? samples / 2 : samples, lineCount);
         }
     };
 

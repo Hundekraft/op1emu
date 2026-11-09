@@ -30,4 +30,11 @@ protected:
 
     std::array<GPIOConnection, DATA_PINS> dataBus;
     Register* selectedRegister = nullptr;
+
+    // OP1EMU_PANEL=c2|a|b: answer R246's panel probes as that panel variant would (OP1-Emulator
+    // docs/firmware/display.md "Panel families and selection"). Unset or "default": no answers, as before.
+    char panel = 0;
+    u32 lastWord = 0;      // the bus word at the last WR rising edge
+    int readIndex = 0;     // reads since that word
+    bool AnswerProbe();
 };

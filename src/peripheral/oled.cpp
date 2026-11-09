@@ -1,5 +1,7 @@
 #include "oled.h"
 #include "utils/log.h"
+#include <cstdlib>
+#include <cstring>
 
 static constexpr int CS_PIN = 0;
 static constexpr int RS_PIN = 1;
@@ -27,6 +29,30 @@ OLED::OLED(std::array<GPIOConnection, OLED::DATA_PINS> bus, GPIOConnection cs, G
     for (u32 i = 0xf30; i <= 0xf41; i++) {
         REG32(REG_GAMMA_SETTINGS, i);
     }
+    if (const char* v = std::getenv("OP1EMU_PANEL")) {
+        if (!std::strcmp(v, "c2")) panel = 'c';
+        else if (!std::strcmp(v, "a")) panel = 'a';
+        else if (!std::strcmp(v, "b")) panel = 'b';
+        else if (std::strcmp(v, "default") && *v) LogError("OP1EMU_PANEL: unknown variant %s (default|c2|a|b)", v);
+        if (panel) LogInfo("OLED: answering panel probes as variant %s", v);
+    }
+}
+
+// Probe replies: register-pair 0x0F15 -> 0xEF, then 0x0F8B..0x0F8D -> 0 (C2, 188 x 376); 8-bit command 0x04 ->
+// xx FE 94 (variant A, 156 x 320); command 0xA1 -> 01 57 61 01 FF (SSD1963 descriptor, variant B, 188 x 376).
+bool OLED::AnswerProbe() {
+    static const u8 rddid[5] = {0x00, 0xFE, 0x94, 0x00, 0x00};
+    static const u8 ddb[5] = {0x01, 0x57, 0x61, 0x01, 0xFF};
+    const int i = readIndex++;
+    if (panel == 'c') {
+        if (lastWord == 0xF15) { WriteToBus(0xEF); return true; }
+        if (lastWord >= 0xF8B && lastWord <= 0xF8D) { WriteToBus(0); return true; }
+    } else if (panel == 'a' && lastWord == 0x04 && i < 5) {
+        WriteToBus(rddid[i]); return true;
+    } else if (panel == 'b' && lastWord == 0xA1 && i < 5) {
+        WriteToBus(ddb[i]); return true;
+    }
+    return false;
 }
 
 GPIOPinDirection OLED::GetDirection(int pin) const {
@@ -78,6 +104,7 @@ bool OLED::SetPinInput(int pin, GPIOPinLevel level) {
         return true;
     } else if (pin == RD_PIN) {
         read = (level == GPIOPinLevel::Low); // Active low
+        if (read && chipSelection && panel && AnswerProbe()) return true;
         if (read && chipSelection) {
             // Perform read operation
             if (!registerSelection) {
@@ -93,6 +120,7 @@ bool OLED::SetPinInput(int pin, GPIOPinLevel level) {
         }
         return true;
     } else if (pin == WR_PIN) {
+        if (panel && write && level == GPIOPinLevel::High && chipSelection) { lastWord = ReadFromBus() & 0xFFFF; readIndex = 0; }
         write = (level == GPIOPinLevel::Low); // Active low
         if (write && chipSelection) {
             data = ReadFromBus();
