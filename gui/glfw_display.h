@@ -102,6 +102,7 @@ private:
     GLuint texture_ = 0;
     GLuint backgroundTexture_ = 0;
     std::vector<uint16_t> framebuffer_;
+    const bool flipLines_ = PanelLinesReversed();   // OP1EMU_PANEL=b: store lines in screen order
     int width_ = 0;
     int height_ = 0;
     int scale_ = 2;  // Scale factor for display

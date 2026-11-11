@@ -290,7 +290,8 @@ void GLFWDisplay::UpdateRowBuffer(int x, int y, const void* data, int length) {
 
     if (pixelsToCopy > 0) {
         std::lock_guard<std::mutex> lock(framebufferMutex_);
-        std::memcpy(&framebuffer_[y * width_ + x], data, pixelsToCopy * sizeof(uint16_t));
+        const int line = flipLines_ ? height_ - 1 - y : y;   // OP1EMU_PANEL=b: screen order
+        std::memcpy(&framebuffer_[line * width_ + x], data, pixelsToCopy * sizeof(uint16_t));
         dirty_ = true;
     }
 }

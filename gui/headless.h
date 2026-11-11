@@ -98,6 +98,7 @@ private:
     mutable std::mutex frameMutex_;
     int width_ = 0, height_ = 0;
     std::vector<uint16_t> work_, latest_;
+    const bool flipLines_ = PanelLinesReversed();   // OP1EMU_PANEL=b: store lines in screen order
     std::vector<uint8_t> seen_;
     size_t remaining_ = 0;
     bool started_ = false;

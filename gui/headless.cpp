@@ -190,7 +190,7 @@ void HeadlessFrontend::UpdateRowBuffer(int x, int y, const void* data, int lengt
         std::fill(seen_.begin(), seen_.end(), 0);
     }
     if (!started_) return;
-    const size_t begin = size_t(y) * width_ + x, count = length / 2;
+    const size_t begin = size_t(flipLines_ ? height_ - 1 - y : y) * width_ + x, count = length / 2;
     std::memcpy(work_.data() + begin, data, length);
     for (size_t i = begin; i < begin + count; ++i) {
         if (!seen_[i]) {
