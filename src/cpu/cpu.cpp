@@ -376,6 +376,29 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
             });
     }
 
+    // DTEST_COMMAND (0xFFE00300): data-array access to L1 instruction SRAM through DTEST_DATA0/1 (0xFFE00400/404), as
+    // the Linux isram driver and kennel's boot-time L1 pokes use it (bit 2 data array, bit 24 instruction memory, bit 1
+    // write; address bits as bfin_sim's dv-bfin_mmu.c). A write to L1 code drops the JIT's translations before the
+    // next block; the access ends the block (a hooked MMR). Other DTEST uses (tag array, data memory) only store.
+    emulator.AddWriteHook(0xFFE00300, [this](u32 addr, u32 v) {
+        emulator.MemoryWrite(addr, &v, 4);
+        if (!(v & (1u << 2)) || !(v & (1u << 24))) {
+            if (v) { static unsigned told; if (told++ < 4) LogWarn("DTEST_COMMAND %#x: only the L1 code data array is modelled", v); }
+            return;
+        }
+        const u32 sram = 0xFFA00000u | ((v >> (26 - 11)) & (1u << 11)) | ((v >> (23 - 15)) & (1u << 15))
+                       | ((v >> (16 - 12)) & (3u << 12)) | (v & 0x47F8u);
+        u8 data[8];
+        if (v & (1u << 1)) {
+            emulator.MemoryRead(0xFFE00400, data, 8);
+            emulator.MemoryWrite(sram, data, 8);
+            l1CodeWritten_ = true;
+        } else {
+            emulator.MemoryRead(sram, data, 8);
+            emulator.MemoryWrite(0xFFE00400, data, 8);
+        }
+    });
+
     bcoreMemory_ = std::make_unique<EmulatorMemory>(emulator);
     bcoreMemory_->SetChainBudget(&cpuState_->chain_budget);
     bcoreMemory_->SetUnstableReads(&cpuState_->unstable_reads);
@@ -570,6 +593,10 @@ HaltReason BlackFinCpu::Run() {
     // Hit entry point, invalidating core to reset cached translations
     if (cpuState_->pc == 0xFFA00000) {
         ApplyOverlay();
+        InvalidateTranslations();
+    }
+    if (l1CodeWritten_) {               // DTEST changed L1 code (see the 0xFFE00300 hook)
+        l1CodeWritten_ = false;
         InvalidateTranslations();
     }
 #ifdef ENABLE_PROFILING

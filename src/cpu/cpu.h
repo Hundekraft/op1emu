@@ -424,6 +424,7 @@ protected:
     profiling::ServiceStats* Service() const { return service_.load(std::memory_order_acquire); }
 #endif
     bool coreTimerExpired_ = false;  // an expiry not latched yet (user mode holds it)
+    bool l1CodeWritten_ = false;     // DTEST wrote L1 instruction SRAM: drop the translations before the next block
     bool userModeLatchWarned_ = false;
 #ifdef ENABLE_PROFILING
     uint64_t userModeLatchDeferred_ = 0;
