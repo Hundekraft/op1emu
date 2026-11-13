@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <cstdlib>
 #include <chrono>
 #include "MT29F4G08.h"
@@ -187,12 +188,26 @@ void MT29F4G08::SendAddress(u8 address) {
     }
 }
 
-void MT29F4G08::SetBusy() {
+// OP1EMU_NAND_TIMING=TR,TPROG,TBERS: busy times (guest microseconds per busy period) for read, program and erase,
+// for flash-load experiments. R246's driver waits on busy many times per page, so these are model units, not the
+// part's datasheet times: about 1,4,20 matches the unit's tape write rate, 40,220,1000 is a stressed (slow) flash.
+// Unset or 0: kBusyTime, as before.
+static long NandTiming(int which) {
+    static long t[3] = {-1, -1, -1};
+    if (t[0] < 0) {
+        t[0] = t[1] = t[2] = 0;
+        if (const char *e = getenv("OP1EMU_NAND_TIMING")) sscanf(e, "%ld,%ld,%ld", &t[0], &t[1], &t[2]);
+    }
+    return t[which];
+}
+
+void MT29F4G08::SetBusy(int which) {
     isBusy = true;
+    const long us = which >= 0 ? NandTiming(which) : 0;
     cpu->QueueEvent([this]() {
         isBusy = false;
         if (readyCallback) readyCallback();
-    }, kBusyTime);
+    }, us > 0 ? std::chrono::nanoseconds(us * 1000) : kBusyTime);
 }
 
 void MT29F4G08::StartPageRead() {
@@ -376,7 +391,7 @@ void MT29F4G08::SavePage(u32 pageNumber) {
 }
 
 void MT29F4G08::ExecuteRead() {
-    SetBusy();
+    SetBusy(0);
     u32 pageNumber = GetCurrentPage();
     u32 column = GetColumnAddress();
 
@@ -389,13 +404,13 @@ void MT29F4G08::ExecuteRead() {
 }
 
 void MT29F4G08::ExecuteProgram() {
-    SetBusy();
+    SetBusy(1);
     u32 pageNumber = GetCurrentPage();
     SavePage(pageNumber);
 }
 
 void MT29F4G08::ExecuteErase() {
-    SetBusy();
+    SetBusy(2);
     u32 blockNumber = GetBlockAddress();
 
     if (blockNumber >= TOTAL_BLOCKS) {

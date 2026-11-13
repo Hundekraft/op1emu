@@ -46,7 +46,7 @@ protected:
     ReadCallback readCallback;
     std::function<void()> readyCallback;
 
-    void SetBusy();
+    void SetBusy(int which = -1);
     void HandleCommand(u8 command);
     void ExecuteRead();
     void ExecuteProgram();
