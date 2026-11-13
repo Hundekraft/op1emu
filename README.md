@@ -152,6 +152,12 @@ the panel's frame sync and the RTC all follow it.
   master. A frame is a word per channel in use: on the OP-1 a primary and a
   secondary word, of which the primary is the audio.
 - Panel frame sync (TE, PORTG3) is a 60 Hz guest-time oscillator.
+- A NAND page read, program or block erase is busy for 1 ns unless
+  `OP1EMU_NAND_TIMING=TR,TPROG,TBERS` sets the three busy times in guest
+  microseconds (0 keeps the 1 ns). The firmware polls busy many times per page,
+  so these are model units, not the datasheet's: `1,4,20` comes close to the
+  unit's tape write rate, `40,220,1000` is a slow (stressed) flash and
+  `100,800,4000` a worst case, for flash-load experiments.
 - An IDLE waits for its wakeup: guest time goes on to the host's next device or
   event time without executing anything (CYCLES counts through it, as on
   hardware), unless a system interrupt SIC_IWR enables is already asserted.
@@ -202,6 +208,19 @@ cmake -S . -B build -DOP1_BUILD_HEADLESS_TESTS=ON
 cmake --build build --target op1emu ldrdump op1-headless-test op1-time-source-test
 ctest --test-dir build -R "headless-test|time-source-test|ldr-smoke" --output-on-failure
 ```
+
+### Audio input and execution trace
+
+`OP1EMU_AUDIO_IN=file.wav` plays a 16-bit WAV into the codec's ADC data on
+SPORT0 RX, so the input engines see it (`OP1EMU_AUDIO_IN_START`,
+`OP1EMU_AUDIO_IN_LOOP`; see [docs/audio-in.md](docs/audio-in.md)). Unset, RX is
+silence as before.
+
+`OP1EMU_TRACE_DIR=dir` writes an aggregated execution trace for firmware
+mapping: the blocks that ran, MMR accesses and interrupts, as TSV files per
+phase (`src/cpu/trace.h`). The headless command `trace NAME` starts a new phase.
+While it traces, every block runs on its own (no chaining, loop blocks or
+copy-and-patch), so the emulator is slower. Unset, nothing changes.
 
 ## USB
 
