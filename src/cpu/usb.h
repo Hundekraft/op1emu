@@ -72,7 +72,8 @@ struct USBEndpoint {
     std::size_t txLimit = 0;
     USBDevice::ReplyCallback txCallback = nullptr;
     std::deque<std::size_t> txShortEnds;   // txBuffer offsets just after each short packet (transfer ends)
-    std::vector<uint8_t> rxBuffer;
+    std::vector<uint8_t> rxBuffer;          // the host's OUT data not in the FIFO yet (ProcessTransfer() moves it)
+    bool rxZeroLength = false;              // a zero-length OUT packet waits for ProcessTransfer()
     USBDevice::WriteDoneCallback rxCallback = nullptr;
 
     u16 txCount = 0;

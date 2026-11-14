@@ -364,7 +364,52 @@ static void RequireOP1(const List& list) {
     }
 }
 
+// An OUT transfer on a data endpoint (EP4, as the OP-1's USB-MIDI): the host's data reaches the guest only at the
+// CPU thread's service, so a guest write-back of INTRRX taken before it cannot store over the packet's bit (the
+// 2026-11-14 stall: RXPKTRDY set, FIFO full, INTRRX clear, the transfer never completed).
+static void TestOutTransfer() {
+    USB usb(0xffc03800);
+    usb.BindInterrupt(0, 1, 2, 3, [](int, int) {});
+    usb.Write32(0x30, 0x0801);   // GLOBAL_ENA, EP4 RX
+    usb.Write32(0x14, 0x10);     // INTRRXE: EP4
+    usb.Write32(0x308, 0x80);    // EP4 RXMAXP
+    std::vector<u8> data(200);
+    for (std::size_t i = 0; i < data.size(); ++i) data[i] = (u8)i;
+    bool done = false;
+    usb.HandleDataWrite(4, 0, data.data(), data.size(), [&] { done = true; });
+    Require((usb.Read32(0x0C) & 0x10) == 0 && (usb.Read32(0x30C) & 1) == 0, "an OUT packet is not visible before the service");
+    usb.Write32(0x0C, 0);        // the guest acknowledging what it read before (nothing for EP4)
+    std::vector<u8> got;
+    for (int packet = 0; packet < 2; ++packet) {
+        usb.ProcessWithInterrupt(0);
+        Require((usb.Read32(0x0C) & 0x10) != 0, "the service sets the packet's INTRRX bit");
+        Require((usb.Read32(0x30C) & 1) != 0, "and RXPKTRDY");
+        const u32 count = usb.Read32(0x310);
+        Require(count == (packet ? 72u : 128u), "a FIFO's worth at a time");
+        usb.Write32(0x0C, 0x10);     // acknowledge
+        for (u32 i = 0; i < count; i += 2) {
+            const u32 w = usb.Read32(0xA0);
+            got.push_back(w & 0xFF);
+            got.push_back((w >> 8) & 0xFF);
+        }
+        usb.Write32(0x30C, 0);       // RXPKTRDY cleared
+        Require(!done, "the transfer completes only when the guest has taken all of it");
+    }
+    usb.ProcessWithInterrupt(0);
+    Require(done && got == data, "the OUT transfer completes with the data in order");
+    // A zero-length packet still shows the guest RXPKTRDY (count 0) before it completes.
+    done = false;
+    usb.HandleDataWrite(4, 0, nullptr, 0, [&] { done = true; });
+    usb.ProcessWithInterrupt(0);
+    Require(!done && (usb.Read32(0x30C) & 1) && usb.Read32(0x310) == 0, "a zero-length packet reaches the guest");
+    usb.Write32(0x0C, 0x10);
+    usb.Write32(0x30C, 0);
+    usb.ProcessWithInterrupt(0);
+    Require(done, "and completes once taken");
+}
+
 int main() {
+    TestOutTransfer();
     auto loop = uvw::loop::create();
     FakeDevice device;
     USBIPServer server(*loop, device);

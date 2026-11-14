@@ -413,15 +413,15 @@ bool USB::ControlIdle() {
 void USB::HandleDataWrite(int ep, int interval, const u8* data, std::size_t length, WriteDoneCallback callback) {
     std::lock_guard<std::mutex> lock(mutex);
 
+    // Only queued here: ProcessTransfer() on the CPU thread moves it into the FIFO and sets RXPKTRDY and the INTRRX
+    // bit. The guest's register accesses take no lock, so setting them from this (USB/IP) thread raced them: the
+    // firmware's interrupt pass writes INTRRX back (W1C, a read-modify-write of epRxInterrupts) and could store over
+    // the new bit. The packet then sat in the FIFO with RXPKTRDY set and no interrupt, and the OUT transfer never
+    // completed (2026-11-14, one stall in a few hundred KB of devupd DATA under load).
     auto& endpoint = endpoints[ep];
-    size_t maxSize = GetMaxFIFOSize(ep);
-
-    std::size_t toWrite = std::min(length, maxSize - endpoint.rxFifo.size());
-    writeHostToDeviceFIFO(ep, data, toWrite);
-    endpoint.rxBuffer.insert(endpoint.rxBuffer.end(), data + toWrite, data + length);
-    endpoint.dataPacketReceived = true;
+    endpoint.rxBuffer.insert(endpoint.rxBuffer.end(), data, data + length);
+    if (!length) endpoint.rxZeroLength = true;
     endpoint.rxCallback = callback;
-    epRxInterrupts |= (1 << ep);
     HostRequested();
 }
 
@@ -492,7 +492,8 @@ void USB::ProcessTransfer() {
                 CountServiceWork(toWrite);
                 ep.rxBuffer.erase(ep.rxBuffer.begin(), ep.rxBuffer.begin() + toWrite);
             }
-            if (ep.rxFifo.size() > 0) {
+            if (ep.rxFifo.size() > 0 || ep.rxZeroLength) {
+                ep.rxZeroLength = false;
                 ep.dataPacketReceived = true;
                 epRxInterrupts |= (1 << i);
             } else if (ep.rxCallback) {
