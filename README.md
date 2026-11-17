@@ -216,6 +216,10 @@ SPORT0 RX, so the input engines see it (`OP1EMU_AUDIO_IN_START`,
 `OP1EMU_AUDIO_IN_LOOP`; see [docs/audio-in.md](docs/audio-in.md)). Unset, RX is
 silence as before.
 
+`OP1EMU_JACK_LINE=1` plugs the line-in jack and `OP1EMU_JACK_PHONES=1` the headphone jack: R246 reads them
+from the I2C expander at 0x27 (an MCP23008; bit 6 = line in, key 0x38, bit 7 = headphones, key 0x39) and
+switches the input source to line, so `OP1EMU_AUDIO_IN` is the line signal. Unset, both are unplugged as before.
+
 `OP1EMU_TRACE_DIR=dir` writes an aggregated execution trace for firmware
 mapping: the blocks that ran, MMR accesses and interrupts, as TSV files per
 phase (`src/cpu/trace.h`). The headless command `trace NAME` starts a new phase.

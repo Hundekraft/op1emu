@@ -125,6 +125,9 @@ void MCP230XX::SwitchRegisterBank() {
                     }
                 }
             }
+            if (const u8 fixed = fixedMask[bank] & iodirInput[bank]) {
+                level[bank] = (level[bank] & ~fixed) | (fixedLevel[bank] & fixed);
+            }
             if (!intClearOnReadIntcap) {
                 ClearInterrupt(bank);
             }
@@ -146,6 +149,11 @@ static std::string Hex(const u8* buffer, u32 length) {
 bool MCP230XX::Read(u8* buffer, u32 length) {
     const std::string name = readRegister ? readRegister->name : "?";
     const u32 reg = readRegister ? readRegister->addr : 0;
+    if (model == MCP230XXModel::MCP23008 && readZero) {
+        for (u32 i = 0; i < length; i++) buffer[i] = 0;
+        if (log_) LogInfo("MCP %#x read  (unmapped): 0", address);
+        return true;
+    }
     const bool ok = RegisterI2CPeripheral::Read(buffer, length);
     if (log_) LogInfo("MCP %#x read  %s(%#x):%s", address, name.c_str(), reg, Hex(buffer, length).c_str());
     return ok;
@@ -154,6 +162,16 @@ bool MCP230XX::Read(u8* buffer, u32 length) {
 bool MCP230XX::Write(const u8* buffer, u32 length) {
     if (log_) LogInfo("MCP %#x write%s%s", address, writeRegister ? (" @" + writeRegister->name).c_str() : "",
                       Hex(buffer, length).c_str());
+    if (model == MCP230XXModel::MCP23008) {
+        // R246 probes register 0x0C (an MCP23017 register) at 0x27 and carries on with its set-up only when the
+        // transfer is acknowledged: acknowledge a pointer the chip lacks, read it as 0 and ignore its data.
+        if (skipWrite) return true;
+        if (!writeRegister && length && registers.find(buffer[0]) == registers.end()) {
+            skipWrite = readZero = true;
+            return true;
+        }
+        readZero = false;
+    }
     const bool bankMode = registerBank;
     int bank = writeRegister ? REG_ADDR2BANK(writeRegister->addr) : -1;
     int reg = writeRegister ? REG_ADDR2REG(writeRegister->addr) : -1;
@@ -186,6 +204,14 @@ Register* MCP230XX::Next(u32 addr) const {
         return const_cast<Register*>(&iter->second);
     }
     return nullptr;
+}
+
+void MCP230XX::SetFixedInput(int pin, GPIOPinLevel l) {
+    if (pin < 0 || pin >= gpioCount) return;
+    const int bank = pin / 8;
+    const u8 bit = 1 << (pin % 8);
+    fixedMask[bank] |= bit;
+    if (l == GPIOPinLevel::High) fixedLevel[bank] |= bit; else fixedLevel[bank] &= ~bit;
 }
 
 bool MCP230XX::SetPinInput(int pin, GPIOPinLevel l) {

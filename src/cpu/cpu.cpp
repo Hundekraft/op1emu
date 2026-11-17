@@ -274,8 +274,17 @@ BlackFinCpu::BlackFinCpu(bool deterministic) : time_(deterministic), pc(0) {
 
     for (int i = 0; i < kGpioExpanderCount; i++) {
         u32 addr = 0x20 + i;
-        gpioExpanders.push_back(std::make_shared<MCP230XX>(addr, MCP230XXModel::MCP23017));
+        // R246 drives 0x27 with the MCP23008 register map (OLAT 0x0A, IODIR 0, GPPU 6, GPIO 9), see
+        // docs/firmware/input.md of the OP-1 emulator repo.
+        gpioExpanders.push_back(std::make_shared<MCP230XX>(addr, i == 7 ? MCP230XXModel::MCP23008 : MCP230XXModel::MCP23017));
         twi->AttachPeripheral(gpioExpanders.back());
+    }
+    // The jack switches: 0x27 bit 6 = line in (R246 key 0x38), bit 7 = headphones (0x39); a high bit is a plug
+    // in. OP1EMU_JACK_LINE=1 / OP1EMU_JACK_PHONES=1 plug them; unplugged by default.
+    {
+        auto plugged = [](const char* name) { const char* v = std::getenv(name); return v && *v && *v != '0'; };
+        gpioExpanders[7]->SetFixedInput(6, plugged("OP1EMU_JACK_LINE") ? GPIOPinLevel::High : GPIOPinLevel::Low);
+        gpioExpanders[7]->SetFixedInput(7, plugged("OP1EMU_JACK_PHONES") ? GPIOPinLevel::High : GPIOPinLevel::Low);
     }
     // TODO: this bit controls DAT_01f007e0, figure out its function
     gpioExpanders[0]->SetPinInput(6, GPIOPinLevel::High); // Set MCP23017 #6 high

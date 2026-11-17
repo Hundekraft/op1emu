@@ -17,6 +17,7 @@ public:
     bool Write(const u8* buffer, u32 length) override;
     bool Read(u8* buffer, u32 length) override;
     Register* Next(u32 addr) const override;
+    void Stop() override { RegisterI2CPeripheral::Stop(); skipWrite = false; }
 
     void SetInterruptCallback(std::function<void(int)> callback) {
         interruptCallback = callback;
@@ -28,6 +29,10 @@ public:
     GPIOPinLevel GetPinOutput(int pin) const override;
 
     int GetPinCount() const override;
+
+    // A board strap on an input pin (a jack switch): the pin reads `l` whenever it is an input, also after
+    // the firmware has used it as an output and switched it back, and without the pull-up reading it high.
+    void SetFixedInput(int pin, GPIOPinLevel l);
 
 protected:
     void SwitchRegisterBank();
@@ -50,8 +55,12 @@ protected:
     std::array<u8, 2> intFlag = {0, 0};
     std::array<u8, 2> intcap = {0, 0};
     std::array<u8, 2> inputConnected = {0, 0};
+    std::array<u8, 2> fixedMask = {0, 0};
+    std::array<u8, 2> fixedLevel = {0, 0};
     std::array<bool, 2> intActive = {false, false};
 
+    bool skipWrite = false;   // MCP23008: the data of a write to a register the chip lacks
+    bool readZero = false;    // MCP23008: the register pointer is one the chip lacks (R246 probes 0x0C): reads give 0
     bool registerBank = false;
     bool intMirror = false;
     bool byteMode = false;
