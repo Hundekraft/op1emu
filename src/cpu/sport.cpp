@@ -27,7 +27,8 @@ uint32_t SPORT::DefaultRateHz() {
 // OP1EMU_AUDIO_IN=<file.wav>: frames played into SPORT0's RX data (the codec ADC), see docs/audio-in.md.
 // OP1EMU_AUDIO_IN_START=<guest seconds> (default 0), OP1EMU_AUDIO_IN_LOOP=1.
 struct AudioIn {
-    std::vector<int16_t> mono;   // one sample per frame (stereo files are averaged)
+    std::vector<int16_t> pcm;    // ch samples per frame (L, R for a stereo file)
+    uint32_t ch = 1;
     int64_t startFrames = 0;     // guest time of file frame 0, in SPORT frames
     bool loop = false;
 };
@@ -69,12 +70,9 @@ static const AudioIn* LoadAudioIn(uint32_t rateHz) {
         if (!dataOff) return fail("no data chunk");
         auto* a = new AudioIn;
         const size_t frames = dataLen / (2 * ch);
-        a->mono.resize(frames);
-        for (size_t i = 0; i < frames; i++) {
-            int sum = 0;
-            for (uint32_t c = 0; c < ch; c++) sum += int16_t(u16(dataOff + (i * ch + c) * 2));
-            a->mono[i] = int16_t(sum / int(ch));
-        }
+        a->ch = ch;
+        a->pcm.resize(frames * ch);
+        for (size_t i = 0; i < frames * ch; i++) a->pcm[i] = int16_t(u16(dataOff + i * 2));
         double start = 0;
         if (const char* v = std::getenv("OP1EMU_AUDIO_IN_START")) start = std::atof(v);
         a->startFrames = int64_t(start * rateHz + 0.5);
@@ -255,20 +253,25 @@ u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
     if (sportNumber == 0)
     if (const AudioIn* in = LoadAudioIn(sampleRateHz_)) {
         // Frame k of this RX stream is due at dmaRxStartNs_ + k / rate; the file's frame 0 is at guest startFrames.
-        // Both L and R words carry sample/2 (R246 mono-sums w0 + w1 and takes the high half: unity).
+        // A mono file puts sample/2 in both the L and R words (R246 mono-sums w0 + w1 and takes the high half: unity);
+        // a stereo file puts L/2 in the L word and R/2 in the R word (the mono sum is the average, as before).
         const int64_t base = int64_t(dmaRxStartNs_ * (unsigned __int128)sampleRateHz_ / 1'000'000'000ULL)
                              - in->startFrames + int64_t(totalRxSamplesDelivered_);
-        const int64_t n = int64_t(in->mono.size());
+        const int64_t n = int64_t(in->pcm.size() / in->ch);
         for (size_t i = 0; i < available; i++) {
             int64_t k = base + int64_t(i);
-            int32_t x = 0;
+            int32_t xs[2] = { 0, 0 };
             if (in->loop && n) { k %= n; if (k < 0) k += n; }
-            if (k >= 0 && k < n) x = in->mono[size_t(k)];
+            if (k >= 0 && k < n) {
+                xs[0] = in->pcm[size_t(k) * in->ch];
+                xs[1] = in->pcm[size_t(k) * in->ch + in->ch - 1];
+            }
             if (!in->loop && (k == 0 || k == n)) {   // the file's edges, in this stream's guest time
                 const double g = dmaRxStartNs_ / 1e9 + double(totalRxSamplesDelivered_ + i) / sampleRateHz_;
                 LogInfo("SPORT audio in: file %s at guest %.4f s", k == 0 ? "starts" : "ends", g);
             }
             for (int c = 0; c < channels; c++) {
+                const int32_t x = xs[c & 1];
                 uint8_t* w = static_cast<uint8_t*>(dest) + i * frameSize + size_t(c) * (bitsPerSample > 16 ? 4 : 2);
                 if (bitsPerSample > 16) { int32_t v = x * 32768; std::memcpy(w, &v, 4); }
                 else { int16_t v = int16_t(x / 2); std::memcpy(w, &v, 2); }
